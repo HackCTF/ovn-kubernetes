@@ -1222,7 +1222,12 @@ func (nc *DefaultNodeNetworkController) Start(ctx context.Context) error {
 	if config.OvnKubeNode.Mode != types.NodeModeDPUHost {
 		if config.OvnKubeNode.Mode == types.NodeModeFull {
 			// Configure route for svc towards shared gateway interface
-			if err := configureSvcRouteViaInterface(nc.routeManager, nc.Gateway.GetGatewayIface(), DummyNextHopIPs()); err != nil {
+			// HackCTF fix: skip when GatewayModeDisabled, because nc.Gateway
+			// is a stub without an openflowManager and GetGatewayIface()
+			// would panic on a nil pointer dereference.
+			if config.Gateway.Mode == config.GatewayModeDisabled {
+				klog.Info("Gateway mode is disabled, skipping svc route configuration")
+			} else if err := configureSvcRouteViaInterface(nc.routeManager, nc.Gateway.GetGatewayIface(), DummyNextHopIPs()); err != nil {
 				return err
 			}
 		}
@@ -1549,7 +1554,12 @@ func (nc *DefaultNodeNetworkController) addOrUpdateNode(node *corev1.Node) error
 	}
 
 	gw := nc.Gateway.(*gateway)
-	gw.openflowManager.updateBridgePMTUDFlowCache(getPMTUDKey(node.Name), addrs)
+	// HackCTF fix: when GatewayModeDisabled the gateway struct is a stub
+	// without an openflowManager; skip PMTUD flow management which is
+	// only meaningful when running an actual gateway bridge.
+	if gw.openflowManager != nil {
+		gw.openflowManager.updateBridgePMTUDFlowCache(getPMTUDKey(node.Name), addrs)
+	}
 
 	if len(nftElems) > 0 {
 		if err := nodenft.UpdateNFTElements(nftElems); err != nil {
@@ -1586,7 +1596,10 @@ func removePMTUDNodeNFTRules(nodeIPs []net.IP) error {
 
 func (nc *DefaultNodeNetworkController) deleteNode(node *corev1.Node) {
 	gw := nc.Gateway.(*gateway)
-	gw.openflowManager.deleteFlowsByKey(getPMTUDKey(node.Name))
+	// HackCTF fix: see addOrUpdateNode; gateway stub has no openflowManager.
+	if gw.openflowManager != nil {
+		gw.openflowManager.deleteFlowsByKey(getPMTUDKey(node.Name))
+	}
 
 	// Use GetNodeAddresses to get node IPs
 	ipsv4, ipsv6, err := util.GetNodeAddresses(config.IPv4Mode, config.IPv6Mode, node)

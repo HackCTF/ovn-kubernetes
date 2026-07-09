@@ -85,6 +85,11 @@ func (c *openflowManager) updateFlowCacheEntry(key string, flows []string) {
 }
 
 func (c *openflowManager) deleteFlowsByKey(key string) {
+	// HackCTF fix: when GatewayModeDisabled the gateway struct is a stub
+	// without a defaultBridge and may have a nil openflowManager; bail out.
+	if c == nil {
+		return
+	}
 	c.flowMutex.Lock()
 	defer c.flowMutex.Unlock()
 	delete(c.flowCache, key)
@@ -200,6 +205,12 @@ func (c *openflowManager) Run(stopChan <-chan struct{}, doneWg *sync.WaitGroup) 
 }
 
 func (c *openflowManager) updateBridgePMTUDFlowCache(key string, ipAddrs []string) {
+	// HackCTF fix: when GatewayModeDisabled the gateway struct is a stub
+	// without a defaultBridge; bail out instead of dereferencing a nil
+	// pointer. PMTUD flow management is irrelevant without a gateway.
+	if c == nil || c.defaultBridge == nil {
+		return
+	}
 	dftFlows := c.defaultBridge.PMTUDDropFlows(ipAddrs)
 	c.updateFlowCacheEntry(key, dftFlows)
 	if c.externalGatewayBridge != nil {

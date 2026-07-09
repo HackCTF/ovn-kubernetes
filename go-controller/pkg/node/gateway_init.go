@@ -280,6 +280,19 @@ func (nc *DefaultNodeNetworkController) initGatewayPreStart(
 	case config.GatewayModeDisabled:
 		var chassisID string
 		klog.Info("Gateway Mode is disabled")
+
+		// HackCTF fix: clean up any stale OVS gateway bridges (e.g. breth1)
+		// that may have been created by a previous deployment with
+		// GatewayModeLocal or GatewayModeShared. When the OVS db has these
+		// bridges persisted, the OVS host daemon recreates them on every
+		// boot BEFORE the ovnkube-node pod starts, which enslaves the
+		// physical uplink (e.g. eth1) and breaks host networking. Cleaning
+		// them up here ensures they are removed from both the running OVS
+		// state and the persistent db, so future boots start clean.
+		if err := cleanupStaleGatewayBridges(); err != nil {
+			klog.Warningf("HackCTF fix: stale gateway bridge cleanup returned error (continuing): %v", err)
+		}
+
 		gw = &gateway{
 			initFunc:     func() error { return nil },
 			readyFunc:    func() (bool, error) { return true, nil },
@@ -534,9 +547,19 @@ func CleanupClusterNode(name string) error {
 
 func (nc *DefaultNodeNetworkController) updateGatewayMAC(link netlink.Link) error {
 	// TBD-merge for dpu-host mode: if interface mac of the dpu-host interface that connects to the
-	// gateway bridge on the dpu changes, we need to update dpu's gatewayBridge.macAddress L3 gateway
+	// gateway bridge on the dpu changes, we need to update ovn's gatewayBridge.macAddress L3 gateway
 	// annotation (see BridgeForInterface)
 	if config.OvnKubeNode.Mode != types.NodeModeFull {
+		return nil
+	}
+
+	// HackCTF fix: with GatewayModeDisabled there is no gateway iface to
+	// compare against; bail out before dereferencing the stub gateway struct.
+	if config.Gateway.Mode == config.GatewayModeDisabled {
+		return nil
+	}
+
+	if nc.Gateway.GetGatewayIface() != link.Attrs().Name {
 		return nil
 	}
 
@@ -566,10 +589,86 @@ func (nc *DefaultNodeNetworkController) updateGatewayMAC(link netlink.Link) erro
 	if err := util.SetL3GatewayConfig(nodeAnnotator, l3gwConf); err != nil {
 		return fmt.Errorf("failed to update L3 gateway config annotation for node: %s, error: %w", node.Name, err)
 	}
+
 	if err := nodeAnnotator.Run(); err != nil {
 		return fmt.Errorf("failed to set node %s annotations: %w", nc.name, err)
 	}
 
 	return nil
 
+}
+
+// cleanupStaleGatewayBridges is a HackCTF-specific workaround for an
+// OVS persistent db issue.
+//
+// Problem: When OVN-Kubernetes previously ran with GatewayModeLocal or
+// GatewayModeShared, the OVS bridge (e.g. breth1) was created with the
+// physical uplink (eth1) enslaved via util.NicToBridge(). Those bridges
+// and their `bridge-uplink` / `bridge-id` external-ids are persisted in
+// the OVS db on the host (/etc/openvswitch/conf.db). On every reboot,
+// the host OVS daemon (started by systemd BEFORE kubelet / ovnkube-node)
+// recreates the bridge from the persistent db, enslaves the uplink, and
+// the host IP can no longer be reached on the physical interface. This
+// leaves the cluster broken in a catch-22: ovnkube-node can't start to
+// clean up because networking is already broken.
+//
+// Fix: When running with GatewayModeDisabled, scan the OVS db for any
+// stale gateway bridges (matching the `breth*` naming convention used by
+// util.GetBridgeName) and remove them by calling util.BridgeToNic(),
+// which moves IP addresses and routes back to the underlying NIC and
+// then deletes the bridge. This removes the bridges from both the
+// running OVS state and the persistent db, so subsequent boots will
+// not recreate them.
+//
+// Safety: only bridges with the `bridge-uplink` external-id set are
+// touched, so internal bridges (br-int) and any unrelated OVS bridges
+// are not affected.
+func cleanupStaleGatewayBridges() error {
+	stdout, stderr, err := util.RunOVSVsctl("list-br")
+	if err != nil {
+		return fmt.Errorf("failed to list OVS bridges: stderr=%q err=%v", stderr, err)
+	}
+	bridges := strings.Split(strings.TrimSpace(stdout), "\n")
+	if len(bridges) == 0 || (len(bridges) == 1 && bridges[0] == "") {
+		klog.Info("HackCTF fix: no OVS bridges found, nothing to clean up")
+		return nil
+	}
+
+	cleaned := 0
+	for _, br := range bridges {
+		br = strings.TrimSpace(br)
+		if br == "" {
+			continue
+		}
+		// Only target the `breth*` gateway bridge naming convention
+		// produced by util.GetBridgeName (e.g. breth0, breth1).
+		if !strings.HasPrefix(br, "breth") {
+			continue
+		}
+		// Confirm this bridge was created by NicToBridge() by checking
+		// for the `bridge-uplink` external-id; skip if absent to avoid
+		// touching unrelated bridges.
+		uplink, _, lerr := util.RunOVSVsctl("br-get-external-id", br, "bridge-uplink")
+		if lerr != nil {
+			klog.Warningf("HackCTF fix: could not query bridge-uplink on %q, skipping (err=%v)", br, lerr)
+			continue
+		}
+		if uplink == "" {
+			klog.V(5).Infof("HackCTF fix: bridge %q has no bridge-uplink external-id, skipping", br)
+			continue
+		}
+		klog.Infof("HackCTF fix: removing stale gateway bridge %q (uplink=%q)", br, uplink)
+		if err := util.BridgeToNic(br); err != nil {
+			klog.Errorf("HackCTF fix: failed to remove stale gateway bridge %q: %v", br, err)
+			continue
+		}
+		cleaned++
+	}
+
+	if cleaned == 0 {
+		klog.Info("HackCTF fix: no stale gateway bridges required cleanup")
+	} else {
+		klog.Infof("HackCTF fix: removed %d stale gateway bridge(s)", cleaned)
+	}
+	return nil
 }
