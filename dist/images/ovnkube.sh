@@ -2107,6 +2107,23 @@ ovnkube-controller-with-node() {
   fi
   echo "ovn_disable_requestedchassis_flag=${ovn_disable_requestedchassis_flag}"
 
+  # HACKCTF: Pre-create egress-services nft chain with correct syntax
+  if [[ ${ovn_egressservice_enable} == "true" ]]; then
+    echo "HackCTF: Pre-creating egress-services nft chain..."
+    nft add table inet ovn-kubernetes 2>/dev/null || true
+    nft add chain inet ovn-kubernetes egress-services '{ type nat hook postrouting priority srcnat; policy accept; }' 2>/dev/null || true
+    nft add set inet ovn-kubernetes egress-service-snat-v4 '{ type ipv4_addr : ipv4_addr; }' 2>/dev/null || true
+    nft add rule inet ovn-kubernetes egress-services snat ip to ip saddr map @egress-service-snat-v4 2>/dev/null || true
+    nft add set inet ovn-kubernetes egress-service-snat-v6 '{ type ipv6_addr : ipv6_addr; }' 2>/dev/null || true
+    nft add rule inet ovn-kubernetes egress-services snat ip6 to ip6 saddr map @egress-service-snat-v6 2>/dev/null || true
+    nft add chain inet ovn-kubernetes egress-services-no-snat '{ type filter hook postrouting priority srcnat; policy accept; }' 2>/dev/null || true
+    nft add set inet ovn-kubernetes egress-service-no-snat-v4 '{ type ipv4_addr; }' 2>/dev/null || true
+    nft add rule inet ovn-kubernetes egress-services-no-snat ip saddr @egress-service-no-snat-v4 return 2>/dev/null || true
+    nft add set inet ovn-kubernetes egress-service-no-snat-v6 '{ type ipv6_addr; }' 2>/dev/null || true
+    nft add rule inet ovn-kubernetes egress-services-no-snat ip6 saddr @egress-service-no-snat-v6 return 2>/dev/null || true
+    echo "HackCTF: egress-services nft chain ready."
+  fi
+
   echo "=============== ovnkube-controller-with-node --init-ovnkube-controller-with-node=========="
   /usr/bin/ovnkube --init-ovnkube-controller ${K8S_NODE} --init-node ${K8S_NODE} \
     ${anp_enabled_flag} \
@@ -2768,6 +2785,24 @@ ovn-node() {
   ovn_v6_masquerade_subnet_opt=
   if [[ -n ${ovn_v6_masquerade_subnet} ]]; then
     ovn_v6_masquerade_subnet_opt="--gateway-v6-masquerade-subnet=${ovn_v6_masquerade_subnet}"
+  fi
+
+  # HACKCTF: Pre-create egress-services nft chain with correct syntax
+  # to avoid "ip or ip6 must be specified with address for inet tables" error
+  if [[ ${ovn_egressservice_enable} == "true" ]]; then
+    echo "HackCTF: Pre-creating egress-services nft chain..."
+    nft add table inet ovn-kubernetes 2>/dev/null || true
+    nft add chain inet ovn-kubernetes egress-services '{ type nat hook postrouting priority srcnat; policy accept; }' 2>/dev/null || true
+    nft add set inet ovn-kubernetes egress-service-snat-v4 '{ type ipv4_addr : ipv4_addr; }' 2>/dev/null || true
+    nft add rule inet ovn-kubernetes egress-services snat ip to ip saddr map @egress-service-snat-v4 2>/dev/null || true
+    nft add set inet ovn-kubernetes egress-service-snat-v6 '{ type ipv6_addr : ipv6_addr; }' 2>/dev/null || true
+    nft add rule inet ovn-kubernetes egress-services snat ip6 to ip6 saddr map @egress-service-snat-v6 2>/dev/null || true
+    nft add chain inet ovn-kubernetes egress-services-no-snat '{ type filter hook postrouting priority srcnat; policy accept; }' 2>/dev/null || true
+    nft add set inet ovn-kubernetes egress-service-no-snat-v4 '{ type ipv4_addr; }' 2>/dev/null || true
+    nft add rule inet ovn-kubernetes egress-services-no-snat ip saddr @egress-service-no-snat-v4 return 2>/dev/null || true
+    nft add set inet ovn-kubernetes egress-service-no-snat-v6 '{ type ipv6_addr; }' 2>/dev/null || true
+    nft add rule inet ovn-kubernetes egress-services-no-snat ip6 saddr @egress-service-no-snat-v6 return 2>/dev/null || true
+    echo "HackCTF: egress-services nft chain ready."
   fi
 
   echo "=============== ovn-node   --init-node"

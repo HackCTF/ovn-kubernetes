@@ -1,0 +1,116 @@
+# syntax=docker/dockerfile:1
+# HackCTF OVN-Kubernetes Minimal Image
+#
+# Objetivo: Reducir imagen de ~1.5GB a ~300-400MB
+# enfoque: Multi-stage build con Ubuntu minbase + paquetes OVS/OVN necesarios
+#
+# Build: docker build -f Dockerfile.hackctf.minimal -t ovn-kube-ubuntu:minimal .
+# Tag:   docker tag ovn-kube-ubuntu:minimal harbor.k8s.local/library/ovn-kube-ubuntu:minimal
+# Push:  docker push harbor.k8s.local/library/ovn-kube-ubuntu:minimal
+
+# ============================================
+# Stage 1: Build ovnkube binary
+# ============================================
+FROM golang:1.25 AS builder
+
+WORKDIR /build
+COPY go-controller/ go-controller/
+
+WORKDIR /build/go-controller
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 go build -mod=vendor -ldflags="-s -w" -o /ovnkube ./cmd/ovnkube/
+
+# Build additional Go binaries needed
+RUN CGO_ENABLED=0 go build -mod=vendor -ldflags="-s -w" -o /ovn-kube-util ./cmd/ovn-kube-util/
+RUN CGO_ENABLED=0 go build -mod=vendor -ldflags="-s -w" -o /ovnkube-identity ./cmd/ovnkube-identity/
+RUN CGO_ENABLED=0 go build -mod=vendor -ldflags="-s -w" -o /ovndbchecker ./cmd/ovndbchecker/
+
+# ============================================
+# Stage 2: Build minimal Ubuntu rootfs
+# ============================================
+FROM ubuntu:25.04 AS rootfs
+
+# Install only what's needed for OVS/OVN runtime
+# Based on official dist/images/Dockerfile.ubuntu
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        # OVS core
+        openvswitch-common \
+        openvswitch-switch \
+        # OVN
+        ovn-common \
+        ovn-host \
+        # Base utilities (official uses these)
+        iproute2 \
+        util-linux \
+        curl \
+        software-properties-common \
+        nftables \
+        # For CNI
+        iptables \
+        # Shell (needed by ovnkube.sh)
+        bash \
+        # SSL certificates (needed for curl to dl.k8s.io)
+        ca-certificates \
+        # SSL libs already pulled by openvswitch-common
+    && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+# Download kubectl (not in Ubuntu repos) - install to /usr/local/bin (in PATH)
+RUN curl -sLo /usr/local/bin/kubectl https://dl.k8s.io/release/v1.28.0/bin/linux/amd64/kubectl && \
+    chmod +x /usr/local/bin/kubectl
+
+# ============================================
+# Stage 3: Final minimal image
+# ============================================
+FROM scratch
+
+# Copy labels from ubuntu
+COPY --from=rootfs /etc/os-release /etc/os-release
+
+# Copy entire rootfs
+COPY --from=rootfs / /
+
+# Copy compiled Go binaries
+COPY --from=builder /ovnkube /usr/bin/ovnkube
+COPY --from=builder /ovn-kube-util /usr/bin/ovn-kube-util
+COPY --from=builder /ovnkube-identity /usr/bin/ovnkube-identity
+COPY --from=builder /ovndbchecker /usr/bin/ovndbchecker
+
+# Copy ovnkube.sh entry script (convert CRLF -> LF to fix bash shebang)
+COPY dist/images/ovnkube.sh /root/ovnkube.sh
+RUN sed -i 's/\r$//' /root/ovnkube.sh
+COPY dist/images/ovndb-raft-functions.sh /root/ovndb-raft-functions.sh
+RUN sed -i 's/\r$//' /root/ovndb-raft-functions.sh
+
+# Copy OVS config
+COPY dist/images/ovn_k8s.conf /etc/openvswitch/ovn_k8s.conf
+
+# Create required directories
+RUN mkdir -p /var/run/openvswitch /var/log/ovn-kubernetes /var/log/openvswitch /var/log/ovn /var/run/ovn /etc/openvswitch /etc/ovn
+
+# ============================================
+# Apply HackCTF patches to ovnkube.sh
+# ============================================
+RUN sed -i 's|ovn_gateway_mode=${OVN_GATEWAY_MODE:-"shared"}|ovn_gateway_mode=${OVN_GATEWAY_MODE}|' /root/ovnkube.sh
+
+# Patch: Set ovn-remote before ovn-controller starts
+RUN sed -i '/wait_for_event ready_to_start_node/a\
+\
+# HACKCTF: Ensure ovn-remote is set before starting ovn-controller\
+ovs-vsctl --if-exists get Open_vSwitch . external_ids:ovn-remote > /dev/null 2>&1 || {\
+    echo "HackCTF: setting external_ids:ovn-remote=${ovn_sbdb}";\
+    ovs-vsctl set Open_vSwitch . external_ids:ovn-remote=${ovn_sbdb};\
+}' /root/ovnkube.sh
+
+# ============================================
+# Image metadata
+# ============================================
+LABEL org.opencontainers.image.title="HackCTF OVN-Kubernetes Minimal"
+LABEL org.opencontainers.image.description="Minimal Ubuntu-based OVN-Kubernetes image (~300MB) with HackCTF fixes for GatewayModeDisabled"
+LABEL org.opencontainers.image.source="https://github.com/HackCTF/ovn-kubernetes"
+LABEL org.opencontainers.image.version="minimal-v1"
+
+WORKDIR /root
+ENTRYPOINT ["/root/ovnkube.sh"]
