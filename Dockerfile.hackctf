@@ -22,6 +22,17 @@ COPY --from=builder /ovnkube /usr/bin/ovnkube
 RUN sed -i 's|ovn_gateway_mode=${OVN_GATEWAY_MODE:-"shared"}|ovn_gateway_mode=${OVN_GATEWAY_MODE}|' /root/ovnkube.sh && \
     grep -n "ovn_gateway_mode=" /root/ovnkube.sh | head -3
 
+# HackCTF fix: set ovn-remote in external_ids before ovn-controller starts
+# This is needed when ovs-db is reset (e.g., by ovs-node DaemonSet restart with emptyDir)
+# The ovn-controller reads ovn-remote from external_ids to connect to OVN SB
+RUN sed -i '/wait_for_event ready_to_start_node/a\
+\
+  # HACKCTF: Ensure ovn-remote is set before starting ovn-controller\
+  ovs-vsctl --if-exists get Open_vSwitch . external_ids:ovn-remote > /dev/null 2>\&1 || {\
+    echo "=============== ovn-controller - (set ovn-remote)";\
+    ovs-vsctl set Open_vSwitch . external_ids:ovn-remote=${ovn_sbdb};\
+  }' /root/ovnkube.sh
+
 LABEL org.opencontainers.image.source="https://github.com/HackCTF/ovn-kubernetes" \
-      org.opencontainers.image.description="OVN-Kubernetes with HackCTF fix: cleanupStaleGatewayBridges on gatewayMode=disabled + respect empty OVN_GATEWAY_MODE" \
-      org.opencontainers.image.version="release-1.1-hackctf-fix-v3"
+      org.opencontainers.image.description="OVN-Kubernetes with HackCTF fix: cleanupStaleGatewayBridges on gatewayMode=disabled + respect empty OVN_GATEWAY_MODE + set ovn-remote before ovn-controller" \
+      org.opencontainers.image.version="release-1.1-hackctf-fix-v6"
