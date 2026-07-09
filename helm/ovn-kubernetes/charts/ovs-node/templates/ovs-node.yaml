@@ -123,8 +123,7 @@ spec:
         hostPath:
           path: /sys
       - name: host-config-openvswitch
-        hostPath:
-          path: /etc/origin/openvswitch
+        emptyDir: {}
       - name: host-var-lib-ovs
         hostPath:
           path: /var/lib/openvswitch
