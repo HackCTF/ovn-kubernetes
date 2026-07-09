@@ -1,0 +1,19 @@
+# syntax=docker/dockerfile:1
+# Stage 1: Build ovnkube binary from modified source
+FROM golang:1.25 AS builder
+
+WORKDIR /build
+COPY go-controller/ go-controller/
+
+WORKDIR /build/go-controller
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 go build -mod=vendor -ldflags="-s -w" -o /ovnkube ./cmd/ovnkube/
+
+# Stage 2: Use existing OVN-K image and replace ovnkube binary
+FROM ghcr.io/ovn-kubernetes/ovn-kubernetes/ovn-kube-ubuntu:release-1.1
+
+COPY --from=builder /ovnkube /usr/bin/ovnkube
+
+LABEL org.opencontainers.image.source="https://github.com/HackCTF/ovn-kubernetes" \
+      org.opencontainers.image.description="OVN-Kubernetes with HackCTF fix: cleanupStaleGatewayBridges on gatewayMode=disabled" \
+      org.opencontainers.image.version="release-1.1-hackctf-fix"

@@ -323,7 +323,13 @@ func (nc *DefaultNodeNetworkController) initGatewayPreStart(
 		var chassisID string
 		klog.Info("Gateway Mode is disabled")
 		gw = &gateway{
-			initFunc:     func() error { return nil },
+			initFunc: func() error {
+				// HackCTF fix: When gateway mode is disabled, clean up any stale gateway
+				// bridges (e.g., breth1) that may have been created by a previous gateway
+				// mode configuration. This prevents OVN from persistently enslaving the
+				// node's physical interface (eth1) to OVS, which broke host networking.
+				return cleanupStaleGatewayBridges()
+			},
 			readyFunc:    func() (bool, error) { return true, nil },
 			watchFactory: nc.watchFactory.(*factory.WatchFactory),
 		}
@@ -650,4 +656,54 @@ func (nc *DefaultNodeNetworkController) updateGatewayMAC(link netlink.Link) erro
 
 	return nil
 
+}
+
+// cleanupStaleGatewayBridges removes any stale OVS bridges that were created by a previous
+// gateway mode configuration. This is necessary because when OVN-Kubernetes runs with
+// gatewayMode=local or gatewayMode=shared, it creates a "breth<N>" bridge (e.g., breth1)
+// that enslaves the node's physical interface (eth1). When gateway mode is changed to
+// disabled, the OVS db keeps the persistent bridge, which causes the physical interface
+// to remain enslaved to OVS, breaking host networking.
+//
+// HackCTF fix: This function detects stale gateway bridges and calls BridgeToNic() to
+// revert the IP/route back to the underlying physical interface, removing the OVS bridge.
+//
+// Strategy:
+//  1. List all OVS bridges
+//  2. For each bridge that starts with "breth" (gateway bridge naming convention)
+//  3. Call util.BridgeToNic() to clean it up
+func cleanupStaleGatewayBridges() error {
+	klog.Info("HackCTF fix: cleaning up stale gateway bridges due to GatewayModeDisabled")
+
+	// Get list of all OVS bridges
+	stdout, _, err := util.RunOVSVsctl("list-br")
+	if err != nil {
+		// If OVS is not running, we can't do anything
+		klog.Warningf("Failed to list OVS bridges (OVS may not be running yet): %v", err)
+		return nil
+	}
+
+	brList := strings.Split(strings.TrimSpace(stdout), "\n")
+	for _, br := range brList {
+		br = strings.TrimSpace(br)
+		if br == "" {
+			continue
+		}
+		// Skip standard OVS bridges that are part of normal operation
+		if br == "br-int" || br == "ovs-system" {
+			continue
+		}
+		// brethX bridges are gateway bridges; breth0 is for eth0 (NAT) which we keep
+		// For breth1, breth2, etc., we want to clean them up
+		if strings.HasPrefix(br, "breth") && br != "breth0" {
+			klog.Infof("HackCTF fix: found stale gateway bridge %s, cleaning up", br)
+			if cleanupErr := util.BridgeToNic(br); cleanupErr != nil {
+				klog.Warningf("HackCTF fix: failed to clean up bridge %s: %v", br, cleanupErr)
+				// Continue with other bridges
+				continue
+			}
+			klog.Infof("HackCTF fix: successfully cleaned up stale bridge %s", br)
+		}
+	}
+	return nil
 }
