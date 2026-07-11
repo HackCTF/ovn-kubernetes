@@ -78,6 +78,17 @@ type NetConf struct {
 		// see https://github.com/k8snetworkplumbingwg/device-info-spec
 		CNIDeviceInfoFile string `json:"CNIDeviceInfoFile,omitempty"`
 	} `json:"runtimeConfig,omitempty"`
+
+	// MacIPEncoding controls whether the MAC address is deterministically
+	// derived from the assigned IPv4 address using OVN-K's variable-length
+	// encoding scheme.
+	//
+	// nil (default): encoding is ON (preserves prior behavior — MAC = IPAddrToHWAddr)
+	// *true:         encoding is ON (uses EncodeMACFromIP for /16-/32, IPAddrToHWAddr fallback for /8-/15)
+	// *false:        encoding is OFF (random MAC via GenerateRandMAC)
+	//
+	// Pod annotation "mac" (NetworkSelectionElement.MacRequest) always overrides this.
+	MacIPEncoding *bool `json:"mac_ip_encoding,omitempty"`
 }
 
 // NetworkSelectionElement represents one element of the JSON format
