@@ -3,6 +3,7 @@ package util
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
@@ -13,6 +14,7 @@ import (
 	"github.com/vishvananda/netlink"
 
 	utilnet "k8s.io/utils/net"
+	"k8s.io/klog/v2"
 )
 
 const (
@@ -110,6 +112,109 @@ func IPAddrToHWAddr(ip net.IP) net.HardwareAddr {
 
 	hash := sha256.Sum256([]byte(ip.String()))
 	return net.HardwareAddr{0x0A, 0x58, hash[0], hash[1], hash[2], hash[3]}
+}
+
+// EncodeMACFromIP derives a MAC address from an IPv4 address using variable-
+// length encoding. The format is:
+//
+//   MAC[0:2] = 0a:58                       (OVN-K OUI)
+//   MAC[2]   = 0x10 + (prefix - 16)        (prefix indicator)
+//   MAC[3:6] = subnet_bits << host_bits | host_bits_of_IP
+//
+// Supported prefixes: /16 to /32. For /8-/15, returns an error (use
+// IPAddrToHWAddr as a fallback).
+func EncodeMACFromIP(ip net.IP, subnet *net.IPNet) (net.HardwareAddr, error) {
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return nil, fmt.Errorf("not an IPv4 address: %s", ip)
+	}
+	subnetIP := subnet.IP.To4()
+	if subnetIP == nil {
+		return nil, fmt.Errorf("subnet is not IPv4: %s", subnet)
+	}
+
+	prefix, _ := subnet.Mask.Size()
+	if prefix < 16 || prefix > 32 {
+		return nil, fmt.Errorf("variable-length encoding requires prefix /16-/32, got /%d", prefix)
+	}
+
+	hostBits := uint32(32 - prefix)
+	ipInt := binary.BigEndian.Uint32(ip4)
+	subnetInt := binary.BigEndian.Uint32(subnetIP)
+	subnetPart := (subnetInt >> hostBits) & 0xFFFF
+	hostPart := ipInt & ((1 << hostBits) - 1)
+	value24 := (subnetPart << hostBits) | hostPart
+
+	mac := make(net.HardwareAddr, 6)
+	copy(mac[0:2], []byte{0x0a, 0x58})
+	mac[2] = byte(0x10 + (prefix - 16))
+	mac[3] = byte((value24 >> 16) & 0xFF)
+	mac[4] = byte((value24 >> 8) & 0xFF)
+	mac[5] = byte(value24 & 0xFF)
+	return mac, nil
+}
+
+// DecodeIPFromMAC reverses EncodeMACFromIP. Returns an error if the MAC is
+// not OVN-K encoded or the prefix indicator doesn't match the subnet.
+func DecodeIPFromMAC(mac net.HardwareAddr, subnet *net.IPNet) (net.IP, error) {
+	prefix, _ := subnet.Mask.Size()
+	if prefix < 16 || prefix > 32 {
+		return nil, fmt.Errorf("decoding requires prefix /16-/32, got /%d", prefix)
+	}
+	if mac[0] != 0x0a || mac[1] != 0x58 {
+		return nil, fmt.Errorf("not an OVN-K encoded MAC: %v", mac)
+	}
+	expectedIndicator := byte(0x10 + (prefix - 16))
+	if mac[2] != expectedIndicator {
+		return nil, fmt.Errorf("prefix indicator %#x does not match subnet /%d (expected %#x)",
+			mac[2], prefix, expectedIndicator)
+	}
+
+	hostBits := uint32(32 - prefix)
+	value24 := uint32(mac[3])<<16 | uint32(mac[4])<<8 | uint32(mac[5])
+	hostPart := value24 & ((1 << hostBits) - 1)
+
+	subnetIP := subnet.IP.To4()
+	subnetInt := binary.BigEndian.Uint32(subnetIP)
+	mask := ^uint32(0) << hostBits
+	fullIP := (subnetInt & mask) | hostPart
+
+	ip := make(net.IP, 4)
+	binary.BigEndian.PutUint32(ip, fullIP)
+	return ip, nil
+}
+
+// ResolveMAC picks the MAC to use for a pod's secondary network interface,
+// respecting explicit pod MacRequest, the mac_ip_encoding toggle, and
+// fallback for unsupported prefixes.
+//
+// Decision order (first match wins):
+//   1. explicitMac != "" → use it (validated)
+//   2. macEncodingEnabled=false → random MAC (GenerateRandMAC)
+//   3. macEncodingEnabled=true + prefix /16-/32 → EncodeMACFromIP
+//   4. macEncodingEnabled=true + prefix /8-/15 → IPAddrToHWAddr (legacy fallback)
+func ResolveMAC(ip net.IP, subnet *net.IPNet, macEncodingEnabled bool, explicitMac string) (net.HardwareAddr, error) {
+	if explicitMac != "" {
+		parsed, err := net.ParseMAC(explicitMac)
+		if err != nil {
+			return nil, fmt.Errorf("invalid MacRequest %q: %w", explicitMac, err)
+		}
+		return parsed, nil
+	}
+
+	if !macEncodingEnabled {
+		return GenerateRandMAC()
+	}
+
+	mac, err := EncodeMACFromIP(ip, subnet)
+	if err == nil {
+		return mac, nil
+	}
+
+	// Fallback for unsupported prefixes (/8-/15)
+	prefix, _ := subnet.Mask.Size()
+	klog.V(3).Infof("Falling back to legacy MAC encoding for prefix /%d: %v", prefix, err)
+	return IPAddrToHWAddr(ip), nil
 }
 
 // HWAddrToIPv6LLA generates the IPv6 link local address from the given hwaddr,
