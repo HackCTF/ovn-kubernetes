@@ -34,5 +34,5 @@ RUN sed -i '/wait_for_event ready_to_start_node/a\
   }' /root/ovnkube.sh
 
 LABEL org.opencontainers.image.source="https://github.com/HackCTF/ovn-kubernetes" \
-      org.opencontainers.image.description="OVN-Kubernetes with HackCTF fix: cleanupStaleGatewayBridges on gatewayMode=disabled + respect empty OVN_GATEWAY_MODE + set ovn-remote before ovn-controller + MAC/IP encoding toggle" \
-      org.opencontainers.image.version="release-1.1-hackctf-fix-v7"
+      org.opencontainers.image.description="OVN-Kubernetes with HackCTF fix: cleanupStaleGatewayBridges on gatewayMode=disabled + respect empty OVN_GATEWAY_MODE + set ovn-remote before ovn-controller + static IP in NAD + MAC/IP encoding toggle" \
+      org.opencontainers.image.version="release-1.1-hackctf-fix-v8"
