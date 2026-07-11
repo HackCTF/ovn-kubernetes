@@ -634,7 +634,7 @@ func (bnc *BaseNetworkController) updatePodAnnotationWithRetry(origPod *corev1.P
 
 // Given a switch, gets the next set of addresses (from the IPAM) for each of the node's
 // subnets to assign to the new pod
-func (bnc *BaseNetworkController) assignPodAddresses(switchName string) (net.HardwareAddr, []*net.IPNet, error) {
+func (bnc *BaseNetworkController) assignPodAddresses(switchName string, macEncodingEnabled bool) (net.HardwareAddr, []*net.IPNet, error) {
 	var (
 		podMAC   net.HardwareAddr
 		podCIDRs []*net.IPNet
@@ -654,7 +654,17 @@ func (bnc *BaseNetworkController) assignPodAddresses(switchName string) (net.Har
 		return nil, nil, err
 	}
 	if len(podCIDRs) > 0 {
-		podMAC = util.IPAddrToHWAddr(podCIDRs[0].IP)
+		// Resolve MAC using encoding toggle. Subnet is obtained from the switch's
+		// configured subnets; if there are none, fall back to legacy encoding.
+		subnets := bnc.lsManager.GetSwitchSubnets(switchName)
+		var subnet *net.IPNet
+		if len(subnets) > 0 {
+			subnet = subnets[0]
+		}
+		podMAC, err = util.ResolveMAC(podCIDRs[0].IP, subnet, macEncodingEnabled, "")
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to resolve MAC for pod on switch %s: %w", switchName, err)
+		}
 	}
 	return podMAC, podCIDRs, nil
 }
@@ -876,7 +886,7 @@ func (bnc *BaseNetworkController) allocatePodAnnotation(pod *corev1.Pod, existin
 			podMac = util.IPAddrToHWAddr(podIfAddrs[0].IP)
 		} else {
 			// Previous attempts to use already configured IPs failed, need to assign new
-			generatedPodMac, generatedPodIfAddrs, err := bnc.assignPodAddresses(switchName)
+			generatedPodMac, generatedPodIfAddrs, err := bnc.assignPodAddresses(switchName, true)
 			if err != nil {
 				return nil, false, fmt.Errorf("failed to assign pod addresses for pod %s on switch: %s, err: %v",
 					podDesc, switchName, err)
