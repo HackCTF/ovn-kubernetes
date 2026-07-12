@@ -997,6 +997,18 @@ func (bnc *BaseNetworkController) allocatePodAnnotationForSecondaryNetwork(pod *
 			network.IPRequest, network.MacRequest, nadName, pod.Namespace, pod.Name)
 	}
 
+	// For flat L2 topology without IPAM: try static IP matching by pod name first
+	if network.IPRequest == nil && !bnc.doesNetworkRequireIPAM() {
+		staticIPs := bnc.GetStaticIPs()
+		for _, entry := range staticIPs {
+			if entry.PodName == pod.Name {
+				network.IPRequest = []string{entry.Address}
+				klog.V(5).Infof("Matched static IP %s for pod %s/%s via podName lookup", entry.Address, pod.Namespace, pod.Name)
+				break
+			}
+		}
+	}
+
 	var ipAllocator subnetipallocator.NamedAllocator
 	if bnc.doesNetworkRequireIPAM() {
 		ipAllocator = bnc.lsManager.ForSwitch(switchName)
