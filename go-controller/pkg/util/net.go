@@ -60,6 +60,41 @@ func GetNodeManagementIfAddr(subnet *net.IPNet) *net.IPNet {
 	return &net.IPNet{IP: iputils.NextIP(gwIfAddr.IP), Mask: subnet.Mask}
 }
 
+// GetSubnetReservedIPs returns the gateway (first usable) and broadcast (last usable) IPs
+// for a given subnet, excluded from IPAM allocation by default.
+// For a /24 subnet like 10.89.0.0/24, returns [10.89.0.1, 10.89.0.255].
+func GetSubnetReservedIPs(subnet *net.IPNet) []*net.IPNet {
+	if subnet == nil {
+		return nil
+	}
+	gwIP := GetNodeGatewayIfAddr(subnet)
+	if gwIP == nil {
+		return nil
+	}
+	broadcastIP := lastIPInSubnet(subnet)
+	if broadcastIP == nil {
+		return nil
+	}
+	return []*net.IPNet{
+		{IP: gwIP.IP, Mask: GetIPFullMask(gwIP.IP)},
+		{IP: broadcastIP, Mask: GetIPFullMask(broadcastIP)},
+	}
+}
+
+// lastIPInSubnet returns the broadcast address (last usable IP) of a subnet.
+// For 10.89.0.0/24, returns 10.89.0.255.
+func lastIPInSubnet(subnet *net.IPNet) net.IP {
+	if subnet == nil {
+		return nil
+	}
+	mask := subnet.Mask
+	broadcast := make(net.IP, len(subnet.IP))
+	for i := range broadcast {
+		broadcast[i] = subnet.IP[i] | ^mask[i]
+	}
+	return broadcast
+}
+
 // GetNodeHybridOverlayIfAddr returns the node logical switch hybrid overlay
 // port address (the ".3" address), return nil if the subnet is invalid
 func GetNodeHybridOverlayIfAddr(subnet *net.IPNet) *net.IPNet {

@@ -470,3 +470,87 @@ func TestContainsCIDR(t *testing.T) {
 		})
 	}
 }
+
+func TestGetSubnetReservedIPs(t *testing.T) {
+	tests := []struct {
+		desc     string
+		subnet   string
+		expGW    string
+		expBcast string
+	}{
+		{
+			desc:     "/24 subnet",
+			subnet:   "10.89.0.0/24",
+			expGW:    "10.89.0.1",
+			expBcast: "10.89.0.255",
+		},
+		{
+			desc:     "/24 different range",
+			subnet:   "192.168.10.0/24",
+			expGW:    "192.168.10.1",
+			expBcast: "192.168.10.255",
+		},
+		{
+			desc:     "/16 subnet",
+			subnet:   "172.16.0.0/16",
+			expGW:    "172.16.0.1",
+			expBcast: "172.16.255.255",
+		},
+		{
+			desc:     "/28 subnet",
+			subnet:   "10.10.10.0/28",
+			expGW:    "10.10.10.1",
+			expBcast: "10.10.10.15",
+		},
+		{
+			desc:     "nil subnet",
+			subnet:   "",
+			expGW:    "",
+			expBcast: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.desc, func(t *testing.T) {
+			if tt.subnet == "" {
+				result := GetSubnetReservedIPs(nil)
+				assert.Nil(t, result)
+				return
+			}
+			_, subnetNet, err := net.ParseCIDR(tt.subnet)
+			require.NoError(t, err)
+			result := GetSubnetReservedIPs(subnetNet)
+			require.Len(t, result, 2)
+			assert.Equal(t, tt.expGW, result[0].IP.String(), "gateway IP mismatch")
+			assert.Equal(t, tt.expBcast, result[1].IP.String(), "broadcast IP mismatch")
+		})
+	}
+}
+
+func TestLastIPInSubnet(t *testing.T) {
+	tests := []struct {
+		desc   string
+		subnet string
+		expIP  string
+	}{
+		{"/24", "10.89.0.0/24", "10.89.0.255"},
+		{"/16", "172.16.0.0/16", "172.16.255.255"},
+		{"/28", "10.10.10.0/28", "10.10.10.15"},
+		{"nil", "", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.desc, func(t *testing.T) {
+			if tt.subnet == "" {
+				result := lastIPInSubnet(nil)
+				assert.Nil(t, result)
+				return
+			}
+			_, subnetNet, err := net.ParseCIDR(tt.subnet)
+			require.NoError(t, err)
+			result := lastIPInSubnet(subnetNet)
+			require.NotNil(t, result)
+			assert.Equal(t, tt.expIP, result.String())
+		})
+	}
+}
