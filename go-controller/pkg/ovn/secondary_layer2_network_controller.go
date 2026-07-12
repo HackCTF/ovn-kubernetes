@@ -483,10 +483,17 @@ func (oc *SecondaryLayer2NetworkController) init() error {
 	oc.switchLoadBalancerGroupUUID = switchLBGroupUUID
 	oc.routerLoadBalancerGroupUUID = routerLBGroupUUID
 
+	// Auto-exclude gateway and broadcast IPs from IPAM for secondary L2 networks.
+	// These are reserved addresses that should never be allocated to pods.
+	excludeSubnets := oc.ExcludeSubnets()
+	for _, subnet := range oc.Subnets() {
+		excludeSubnets = append(excludeSubnets, util.GetSubnetReservedIPs(subnet.CIDR)...)
+	}
+
 	_, err = oc.initializeLogicalSwitch(
 		oc.GetNetworkScopedSwitchName(types.OVNLayer2Switch),
 		oc.Subnets(),
-		oc.ExcludeSubnets(),
+		excludeSubnets,
 		oc.clusterLoadBalancerGroupUUID,
 		oc.switchLoadBalancerGroupUUID,
 	)
