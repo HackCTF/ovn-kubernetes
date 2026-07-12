@@ -1002,6 +1002,20 @@ func (bnc *BaseNetworkController) allocatePodAnnotationForSecondaryNetwork(pod *
 			ipNet.IP = ip
 			podIPs = append(podIPs, ipNet)
 		}
+		// Validate static IPs are not reserved addresses (gateway or broadcast)
+		for _, podIP := range podIPs {
+			for _, subnet := range bnc.Subnets() {
+				reserved := util.GetSubnetReservedIPs(subnet.CIDR)
+				for _, r := range reserved {
+					if podIP.IP.Equal(r.IP) {
+						return nil, false, fmt.Errorf(
+							"static IP %s is a reserved address (%s) in subnet %s — "+
+								"cannot assign gateway or broadcast IPs to pods",
+							podIP.IP, reservedLabel(podIP.IP, subnet.CIDR), subnet.CIDR)
+					}
+				}
+			}
+		}
 		podAnnotation := &util.PodAnnotation{
 			IPs:      podIPs,
 			MAC:      util.IPAddrToHWAddr(podIPs[0].IP),
@@ -1089,6 +1103,15 @@ func (bnc *BaseNetworkController) allocatePodAnnotationForSecondaryNetwork(pod *
 	}
 
 	return podAnnotation, false, nil
+}
+
+// reservedLabel returns a human-readable label for a reserved IP (gateway or broadcast).
+func reservedLabel(ip net.IP, subnet *net.IPNet) string {
+	gw := util.GetNodeGatewayIfAddr(subnet)
+	if gw != nil && ip.Equal(gw.IP) {
+		return "gateway"
+	}
+	return "broadcast"
 }
 
 func (bnc *BaseNetworkController) allocatesPodAnnotation() bool {
