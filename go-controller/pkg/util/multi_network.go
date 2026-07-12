@@ -47,6 +47,8 @@ type NetInfo interface {
 	Vlan() uint
 	AllowsPersistentIPs() bool
 	PhysicalNetworkName() string
+	// GetStaticIPs returns the static IP entries configured for this network
+	GetStaticIPs() []ovncnitypes.StaticIPEntry
 
 	// dynamic information, can change over time
 	GetNADs() []string

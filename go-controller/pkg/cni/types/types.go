@@ -89,6 +89,24 @@ type NetConf struct {
 	//
 	// Pod annotation "mac" (NetworkSelectionElement.MacRequest) always overrides this.
 	MacIPEncoding *bool `json:"mac_ip_encoding,omitempty"`
+
+	// StaticIPs defines a pool of static IP addresses for this network.
+	// Each entry maps a pod name to a specific IP address.
+	// When a pod is created, OVN-K matches pod.Name against entries
+	// and assigns the corresponding IP.
+	// If no match is found, falls back to random IPAM allocation.
+	StaticIPs []StaticIPEntry `json:"staticIPs,omitempty"`
+}
+
+// StaticIPEntry defines a static IP address mapping for a specific pod.
+// Used in NAD config to assign predetermined IPs to pods by name.
+type StaticIPEntry struct {
+	// Address is the CIDR notation IP address (e.g. "10.88.0.50/24")
+	Address string `json:"address"`
+	// Gateway is the default gateway for this IP (e.g. "10.88.0.1")
+	Gateway string `json:"gateway"`
+	// PodName is the name of the pod this IP should be assigned to
+	PodName string `json:"podName"`
 }
 
 // NetworkSelectionElement represents one element of the JSON format
