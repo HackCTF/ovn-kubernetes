@@ -110,7 +110,7 @@ ovs-vsctl --if-exists get Open_vSwitch . external_ids:ovn-remote > /dev/null 2>&
 LABEL org.opencontainers.image.title="HackCTF OVN-Kubernetes Minimal"
 LABEL org.opencontainers.image.description="Minimal Ubuntu-based OVN-Kubernetes image (~300MB) with HackCTF fixes for GatewayModeDisabled"
 LABEL org.opencontainers.image.source="https://github.com/HackCTF/ovn-kubernetes"
-LABEL org.opencontainers.image.version="hackctf-v18"
+LABEL org.opencontainers.image.version="hackctf-v19"
 
 WORKDIR /root
 ENTRYPOINT ["/root/ovnkube.sh"]

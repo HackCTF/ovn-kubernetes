@@ -969,11 +969,11 @@ func (bnc *BaseNetworkController) allocatePodAnnotationForSecondaryNetwork(pod *
 		network = &nadapi.NetworkSelectionElement{}
 	}
 
-	// For flat L2 topology without IPAM: try static IP matching by pod name.
-	// This MUST happen BEFORE the allocatesPodAnnotation() early return,
-	// because that check returns early when cluster-manager handles allocation,
-	// and our staticIPs code would never be reached.
-	if len(network.IPRequest) == 0 && !bnc.doesNetworkRequireIPAM() {
+	// For any topology: try static IP matching by pod name.
+	// This works for both flat L2 (no IPAM) and L2 with subnets (DHCP fallback).
+	// For flat L2: if no match found, error occurs later (no subnet to allocate from).
+	// For L2 with subnets: if no match found, IPAM allocates from subnet (DHCP fallback).
+	if len(network.IPRequest) == 0 {
 		staticIPs := bnc.GetStaticIPs()
 		for _, entry := range staticIPs {
 			if entry.PodName == pod.Name {
@@ -988,38 +988,38 @@ func (bnc *BaseNetworkController) allocatePodAnnotationForSecondaryNetwork(pod *
 		}
 	}
 
+	// If we have a static IP match, create annotation directly (bypass IPAM).
+	// This avoids validateStaticIPRequest which blocks static IPs for secondary networks.
+	if len(network.IPRequest) > 0 {
+		klog.Infof("DEBUG-HACKCTF: staticIP matched for %s/%s, creating annotation directly (bypassing IPAM)",
+			pod.Namespace, pod.Name)
+		var podIPs []*net.IPNet
+		for _, ipStr := range network.IPRequest {
+			ip, ipNet, err := net.ParseCIDR(ipStr)
+			if err != nil {
+				return nil, false, fmt.Errorf("failed to parse static IP %s: %w", ipStr, err)
+			}
+			ipNet.IP = ip
+			podIPs = append(podIPs, ipNet)
+		}
+		podAnnotation := &util.PodAnnotation{
+			IPs:      podIPs,
+			MAC:      util.IPAddrToHWAddr(podIPs[0].IP),
+			Gateways: network.GatewayRequest,
+			Role:     networkRole,
+		}
+		if err := bnc.updatePodAnnotationWithRetry(pod, podAnnotation, nadName); err != nil {
+			return nil, false, fmt.Errorf("failed to write staticIP annotation for %s/%s/%s: %w",
+				nadName, pod.Namespace, pod.Name, err)
+		}
+		return podAnnotation, true, nil
+	}
+
 	// In certain configurations, pod IP allocation is handled from cluster
 	// manager so wait for it to allocate the IPs
 	if !bnc.allocatesPodAnnotation() {
 		podAnnotation, _ := util.UnmarshalPodAnnotation(pod.Annotations, nadName)
 		if !util.IsValidPodAnnotation(podAnnotation) {
-			// If we have static IPs for this pod, create the annotation directly
-			// instead of waiting for cluster-manager (which won't allocate IPs for
-			// flat L2 without subnets).
-			if len(network.IPRequest) > 0 {
-				klog.Infof("DEBUG-HACKCTF: allocatesPodAnnotation=false but staticIPs set for %s/%s, creating annotation directly",
-					pod.Namespace, pod.Name)
-				var podIPs []*net.IPNet
-				for _, ipStr := range network.IPRequest {
-					ip, ipNet, err := net.ParseCIDR(ipStr)
-					if err != nil {
-						return nil, false, fmt.Errorf("failed to parse static IP %s: %w", ipStr, err)
-					}
-					ipNet.IP = ip
-					podIPs = append(podIPs, ipNet)
-				}
-				podAnnotation = &util.PodAnnotation{
-					IPs:      podIPs,
-					MAC:      util.IPAddrToHWAddr(podIPs[0].IP),
-					Gateways: network.GatewayRequest,
-					Role:     networkRole,
-				}
-				if err := bnc.updatePodAnnotationWithRetry(pod, podAnnotation, nadName); err != nil {
-					return nil, false, fmt.Errorf("failed to write staticIP annotation for %s/%s/%s: %w",
-						nadName, pod.Namespace, pod.Name, err)
-				}
-				return podAnnotation, true, nil
-			}
 			return nil, false, ovntypes.NewSuppressedError(fmt.Errorf(
 				"failed to get PodAnnotation for %s/%s/%s, cluster manager might have not allocated it yet",
 				nadName, pod.Namespace, pod.Name))
@@ -1043,8 +1043,13 @@ func (bnc *BaseNetworkController) allocatePodAnnotationForSecondaryNetwork(pod *
 			network.IPRequest, network.MacRequest, nadName, pod.Namespace, pod.Name)
 	}
 
-	klog.Infof("DEBUG-HACKCTF: pod %s/%s secondary net=%s IPRequest=%v doesRequireIPAM=%v staticIPs=%v",
-		pod.Namespace, pod.Name, nadName, network.IPRequest, bnc.doesNetworkRequireIPAM(), bnc.GetStaticIPs())
+	if bnc.doesNetworkRequireIPAM() {
+		klog.Infof("DEBUG-HACKCTF: pod %s/%s secondary net=%s IPRequest=%v (IPAM=DHCP fallback available) staticIPs=%v",
+			pod.Namespace, pod.Name, nadName, network.IPRequest, bnc.GetStaticIPs())
+	} else {
+		klog.Infof("DEBUG-HACKCTF: pod %s/%s secondary net=%s IPRequest=%v (no IPAM, static only) staticIPs=%v",
+			pod.Namespace, pod.Name, nadName, network.IPRequest, bnc.GetStaticIPs())
+	}
 
 	var ipAllocator subnetipallocator.NamedAllocator
 	if bnc.doesNetworkRequireIPAM() {
