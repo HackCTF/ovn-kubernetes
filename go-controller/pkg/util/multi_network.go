@@ -631,6 +631,11 @@ func (nInfo *DefaultNetInfo) PhysicalNetworkName() string {
 	return ""
 }
 
+// GetStaticIPs returns nil for default network (staticIPs not supported on default network)
+func (nInfo *DefaultNetInfo) GetStaticIPs() []ovncnitypes.StaticIPEntry {
+	return nil
+}
+
 // SecondaryNetInfo holds the network name information for secondary network if non-nil
 type secondaryNetInfo struct {
 	mutableNetInfo
@@ -650,6 +655,8 @@ type secondaryNetInfo struct {
 	joinSubnets        []*net.IPNet
 
 	physicalNetworkName string
+
+	staticIPs []ovncnitypes.StaticIPEntry
 }
 
 func (nInfo *secondaryNetInfo) GetNetInfo() NetInfo {
@@ -765,6 +772,11 @@ func (nInfo *secondaryNetInfo) PhysicalNetworkName() string {
 	return nInfo.physicalNetworkName
 }
 
+// GetStaticIPs returns the static IP entries configured for this network
+func (nInfo *secondaryNetInfo) GetStaticIPs() []ovncnitypes.StaticIPEntry {
+	return nInfo.staticIPs
+}
+
 // IPMode returns the ipv4/ipv6 mode
 func (nInfo *secondaryNetInfo) IPMode() (bool, bool) {
 	return nInfo.ipv4mode, nInfo.ipv6mode
@@ -866,6 +878,7 @@ func (nInfo *secondaryNetInfo) copy() *secondaryNetInfo {
 		excludeSubnets:      nInfo.excludeSubnets,
 		joinSubnets:         nInfo.joinSubnets,
 		physicalNetworkName: nInfo.physicalNetworkName,
+		staticIPs:           nInfo.staticIPs,
 	}
 	// copy mutables
 	c.mutableNetInfo.copyFrom(&nInfo.mutableNetInfo)
@@ -916,6 +929,7 @@ func newLayer2NetConfInfo(netconf *ovncnitypes.NetConf) (MutableNetInfo, error) 
 		excludeSubnets:     excludes,
 		mtu:                netconf.MTU,
 		allowPersistentIPs: netconf.AllowPersistentIPs,
+		staticIPs:          netconf.StaticIPs,
 		mutableNetInfo: mutableNetInfo{
 			id:   types.InvalidID,
 			nads: sets.Set[string]{},
@@ -940,6 +954,7 @@ func newLocalnetNetConfInfo(netconf *ovncnitypes.NetConf) (MutableNetInfo, error
 		vlan:                uint(netconf.VLANID),
 		allowPersistentIPs:  netconf.AllowPersistentIPs,
 		physicalNetworkName: netconf.PhysicalNetworkName,
+		staticIPs:           netconf.StaticIPs,
 		mutableNetInfo: mutableNetInfo{
 			id:   types.InvalidID,
 			nads: sets.Set[string]{},
