@@ -877,6 +877,18 @@ func (bnc *BaseNetworkController) allocatePodAnnotation(pod *corev1.Pod, existin
 		}
 	}
 	if needsNewMacOrIPAllocation {
+		// For flat L2 topology without IPAM: try static IP matching by pod name first
+		if network != nil && network.IPRequest == nil && !bnc.doesNetworkRequireIPAM() {
+			staticIPs := bnc.GetStaticIPs()
+			for _, entry := range staticIPs {
+				if entry.PodName == pod.Name {
+					network.IPRequest = []string{entry.Address}
+					klog.V(5).Infof("Matched static IP %s for pod %s via podName lookup", entry.Address, podDesc)
+					break
+				}
+			}
+		}
+
 		if network != nil && network.IPRequest != nil && !bnc.doesNetworkRequireIPAM() {
 			klog.V(5).Infof("Will use static IP addresses for pod %s on a flatL2 topology without subnet defined", podDesc)
 			podIfAddrs, err = calculateStaticIPs(podDesc, network.IPRequest)
