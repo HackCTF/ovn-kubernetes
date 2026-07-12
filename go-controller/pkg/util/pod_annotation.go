@@ -568,6 +568,7 @@ func AddRoutesGatewayIP(
 		// for secondary network, see if its network-attachment's annotation has default-route key.
 		// If present, then we need to add default route for it
 		podAnnotation.Gateways = append(podAnnotation.Gateways, network.GatewayRequest...)
+		podAnnotation.Gateways = removeDuplicateIPs(podAnnotation.Gateways)
 		topoType := netinfo.TopologyType()
 		switch topoType {
 		case types.LocalnetTopology:

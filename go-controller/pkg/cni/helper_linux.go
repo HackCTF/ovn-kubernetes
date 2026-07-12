@@ -5,12 +5,14 @@ package cni
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	current "github.com/containernetworking/cni/pkg/types/100"
@@ -191,14 +193,30 @@ func setupNetwork(link netlink.Link, ifInfo *PodInterfaceInfo) error {
 			return fmt.Errorf("failed to add IP addr %s to %s: %v", ip, link.Attrs().Name, err)
 		}
 	}
+	// Log existing routes on this link before adding gateway routes (diagnostic for "file exists" errors)
+	if existingRoutes, err := util.GetNetLinkOps().RouteList(link, netlink.FAMILY_ALL); err == nil && len(existingRoutes) > 0 {
+		for _, r := range existingRoutes {
+			klog.Infof("setupNetwork existing route on %s: dst=%v gw=%v src=%v scope=%v table=%v",
+				link.Attrs().Name, r.Dst, r.Gw, r.Src, r.Scope, r.Table)
+		}
+	}
+
 	for _, gw := range ifInfo.Gateways {
 		if err := cniPluginLibOps.AddRoute(nil, gw, link, ifInfo.RoutableMTU); err != nil {
-			return fmt.Errorf("failed to add gateway route to link '%s': %v", link.Attrs().Name, err)
+			if errors.Is(err, syscall.EEXIST) {
+				klog.Warningf("Gateway route via %v on %s already exists, skipping (possible CNI retry or double invocation)", gw, link.Attrs().Name)
+			} else {
+				return fmt.Errorf("failed to add gateway route to link '%s': %v", link.Attrs().Name, err)
+			}
 		}
 	}
 	for _, route := range ifInfo.Routes {
 		if err := cniPluginLibOps.AddRoute(route.Dest, route.NextHop, link, ifInfo.RoutableMTU); err != nil {
-			return fmt.Errorf("failed to add pod route %v via %v: %v", route.Dest, route.NextHop, err)
+			if errors.Is(err, syscall.EEXIST) {
+				klog.Warningf("Pod route %v via %v on %s already exists, skipping", route.Dest, route.NextHop, link.Attrs().Name)
+			} else {
+				return fmt.Errorf("failed to add pod route %v via %v: %v", route.Dest, route.NextHop, err)
+			}
 		}
 	}
 

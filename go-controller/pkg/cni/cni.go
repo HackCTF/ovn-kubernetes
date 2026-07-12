@@ -128,6 +128,9 @@ func (pr *PodRequest) cmdAddWithGetCNIResultFunc(
 		return nil, fmt.Errorf("required CNI variable missing")
 	}
 
+	klog.Infof("CNI cmdAdd: pod=%s/%s net=%s sandbox=%s ifName=%s cmd=%s",
+		namespace, podName, pr.nadName, pr.SandboxID[:12], pr.IfName, pr.Command)
+
 	kubecli := &kube.Kube{KClient: clientset.kclient}
 	annotCondFn := isOvnReady
 	netdevName := ""
@@ -364,6 +367,10 @@ func HandlePodRequest(
 // instance of the pod in the apiserver, see checkCancelSandbox for more info.
 // If kube api is not available from the CNI, pass nil to skip this check.
 func getCNIResult(pr *PodRequest, getter PodInfoGetter, podInterfaceInfo *PodInterfaceInfo) (*current.Result, error) {
+	klog.Infof("getCNIResult: pod=%s/%s net=%s sandbox=%s ifName=%s gateways=%v ips=%v mtu=%d skipIP=%v",
+		pr.PodNamespace, pr.PodName, pr.nadName, pr.SandboxID[:12], pr.IfName,
+		podInterfaceInfo.Gateways, podInterfaceInfo.IPs, podInterfaceInfo.MTU, podInterfaceInfo.SkipIPConfig)
+
 	interfacesArray, err := podRequestInterfaceOps.ConfigureInterface(pr, getter, podInterfaceInfo)
 	if err != nil {
 		return nil, fmt.Errorf("failed to configure pod interface: %v", err)
