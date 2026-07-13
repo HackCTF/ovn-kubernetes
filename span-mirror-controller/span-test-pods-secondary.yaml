@@ -1,0 +1,78 @@
+---
+# Test pods for SPAN Mirror Controller
+# 2 targets on VLAN 10, 1 sniffer on SPAN
+# All on nervous-vaughan node
+apiVersion: v1
+kind: Pod
+metadata:
+  name: span-target-1
+  namespace: user-superadmin
+  labels:
+    mirror.kumi.io/target: "true"
+  annotations:
+    k8s.v1.cni.cncf.io/networks: '[{"name":"lab-l2-attacks-v2-ovn-vlan10"}]'
+spec:
+  nodeSelector:
+    kubernetes.io/hostname: nervous-vaughan
+  containers:
+  - name: netshoot
+    image: harbor.k8s.local/library/kubectl:1-debian13-dev
+    command: ["sleep", "infinity"]
+    resources:
+      limits:
+        cpu: "100m"
+        memory: "64Mi"
+      requests:
+        cpu: "50m"
+        memory: "32Mi"
+  terminationGracePeriodSeconds: 0
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: span-target-2
+  namespace: user-superadmin
+  labels:
+    mirror.kumi.io/target: "true"
+  annotations:
+    k8s.v1.cni.cncf.io/networks: '[{"name":"lab-l2-attacks-v2-ovn-vlan10"}]'
+spec:
+  nodeSelector:
+    kubernetes.io/hostname: nervous-vaughan
+  containers:
+  - name: netshoot
+    image: harbor.k8s.local/library/kubectl:1-debian13-dev
+    command: ["sleep", "infinity"]
+    resources:
+      limits:
+        cpu: "100m"
+        memory: "64Mi"
+      requests:
+        cpu: "50m"
+        memory: "32Mi"
+  terminationGracePeriodSeconds: 0
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: span-sniffer
+  namespace: user-superadmin
+  labels:
+    mirror.kumi.io/sniffer: "true"
+  annotations:
+    k8s.v1.cni.cncf.io/networks: '[{"name":"lab-l2-attacks-v2-ovn-span"}]'
+spec:
+  nodeSelector:
+    kubernetes.io/hostname: nervous-vaughan
+  containers:
+  - name: netshoot
+    image: harbor.k8s.local/library/kubectl:1-debian13-dev
+    command: ["sleep", "infinity"]
+    resources:
+      limits:
+        cpu: "100m"
+        memory: "64Mi"
+      requests:
+        cpu: "50m"
+        memory: "32Mi"
+  terminationGracePeriodSeconds: 0

@@ -1,0 +1,133 @@
+---
+# SPAN Mirror Controller — Standalone DaemonSet
+#
+# Watches pods with labels:
+#   mirror.kumi.io/target=true   → pods to mirror (sources)
+#   mirror.kumi.io/sniffer=true  → destination pod (sink)
+#
+# Automatically reconfigures OVS SPAN mirror on br-int when ports change.
+#
+# Deployment:
+#   kubectl create configmap span-mirror-scripts \
+#     --from-file=span-mirror-controller.sh=span-mirror-controller.sh \
+#     -n kube-system
+#   kubectl apply -f span-mirror-controller.yaml
+#
+# Or use the deploy script:
+#   ./deploy-span-mirror.sh
+#
+# Architecture note:
+#   This is Enfoque A (shell polling). For production, Enfoque B (Go + libovsdb
+#   Monitor) is recommended. The labels, RBAC, and OVS mirror format are
+#   designed to be compatible with both approaches for easy migration.
+#
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: span-mirror-controller
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: span-mirror-controller
+rules:
+- apiGroups: [""]
+  resources: ["pods", "nodes"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: span-mirror-ovs-exec
+  namespace: ovn-kubernetes
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list"]
+- apiGroups: [""]
+  resources: ["pods/exec"]
+  verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: span-mirror-ovs-exec
+  namespace: ovn-kubernetes
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: span-mirror-ovs-exec
+subjects:
+- kind: ServiceAccount
+  name: span-mirror-controller
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: span-mirror-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: span-mirror-controller
+subjects:
+- kind: ServiceAccount
+  name: span-mirror-controller
+  namespace: kube-system
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: span-mirror-controller
+  namespace: kube-system
+  labels:
+    app: span-mirror-controller
+spec:
+  selector:
+    matchLabels:
+      app: span-mirror-controller
+  template:
+    metadata:
+      labels:
+        app: span-mirror-controller
+    spec:
+      serviceAccountName: span-mirror-controller
+      priorityClassName: system-node-critical
+      tolerations:
+      - key: node-role.kubernetes.io/control-plane
+        effect: NoSchedule
+      - key: node-role.kubernetes.io/master
+        effect: NoSchedule
+      - operator: Exists
+        effect: NoExecute
+      - operator: Exists
+        effect: NoSchedule
+      containers:
+      - name: controller
+        image: harbor.k8s.local/library/kubectl:1-debian13-dev
+        command: ["/bin/bash", "/scripts/span-mirror-controller.sh"]
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: POLL_INTERVAL
+          value: "5"
+        - name: MIRROR_NAME
+          value: "span-auto"
+        - name: BRIDGE
+          value: "br-int"
+        - name: OVS_NAMESPACE
+          value: "ovn-kubernetes"
+        - name: LOG_LEVEL
+          value: "INFO"
+        volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+          readOnly: true
+      volumes:
+      - name: scripts
+        configMap:
+          name: span-mirror-scripts
+          defaultMode: 0755
