@@ -275,7 +275,10 @@ spec:
         readinessProbe:
         {%- if ovnkube_app_name!="ovnkube-node-dpu" %}
           exec:
-            command: ["/usr/bin/ovn-kube-util", "readiness-probe", "-t", "ovnkube-node"]
+            # HACKCTF net1-race fix: the native probe hardcodes /etc/cni/net.d/10-ovn-kubernetes.conf
+            # (readiness-probe.go: "we always use /etc/cni/net.d"). Since ovnkube-node now writes its
+            # CNI conf to a subdir CRI-O does not scan (--cni-conf-dir), check the conf there instead.
+            command: ["sh", "-c", "test -f /etc/cni/net.d/ovn.d/10-ovn-kubernetes.conf"]
           initialDelaySeconds: 30
           timeoutSeconds: 30
           periodSeconds: 60

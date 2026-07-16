@@ -2806,7 +2806,11 @@ ovn-node() {
   fi
 
   echo "=============== ovn-node   --init-node"
+  # HACKCTF net1-race fix: write the CNI conf to a subdir CRI-O does not scan, so
+  # CRI-O only ever sees 00-multus.conf and cannot bypass Multus. Must match
+  # multus --multus-autoconfig-dir. See multus docs/HACKCTF-net1-attach-race.md.
   /usr/bin/ovnkube --init-node ${K8S_NODE} \
+        --cni-conf-dir=/etc/cni/net.d/ovn.d \
         ${anp_enabled_flag} \
         ${disable_forwarding_flag} \
         ${disable_ovn_iface_id_ver_flag} \
