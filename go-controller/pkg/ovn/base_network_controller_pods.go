@@ -772,6 +772,26 @@ func (bnc *BaseNetworkController) WatchPods() error {
 	return err
 }
 
+// staticIPKeyLabel is the label Kumi stamps identically on lab containers and
+// KubeVirt VMIs. Its value equals the NAD staticIPs[].podName, so a pod's static
+// IP match does not depend on the (random) virt-launcher pod name.
+const staticIPKeyLabel = "kumi.io/static-ip-key"
+
+// staticIPMatchKey returns the identity used to match a pod against a NAD
+// staticIPs[].podName entry, plus which path was taken (for logging).
+// Precedence: the kumi.io/static-ip-key label (works for containers and VMs),
+// then the KubeVirt VM name (defensive fallback for VMs without the label),
+// then the pod name (upstream default).
+func staticIPMatchKey(pod *corev1.Pod) (key, via string) {
+	if v, ok := pod.Labels[staticIPKeyLabel]; ok && v != "" {
+		return v, "label"
+	}
+	if vmKey := kubevirt.ExtractVMNameFromPod(pod); vmKey != nil {
+		return vmKey.Name, "vm"
+	}
+	return pod.Name, "pod"
+}
+
 func calculateStaticIPs(podDesc string, ips []string) ([]*net.IPNet, error) {
 	var staticIPs []*net.IPNet
 	klog.V(5).Infof("Pod %s requested static IPs: %s", podDesc, strings.Join(ips, ";"))
@@ -879,11 +899,12 @@ func (bnc *BaseNetworkController) allocatePodAnnotation(pod *corev1.Pod, existin
 	if needsNewMacOrIPAllocation {
 		// For flat L2 topology without IPAM: try static IP matching by pod name first
 		if network != nil && network.IPRequest == nil && !bnc.doesNetworkRequireIPAM() {
+			matchKey, matchVia := staticIPMatchKey(pod)
 			staticIPs := bnc.GetStaticIPs()
 			for _, entry := range staticIPs {
-				if entry.PodName == pod.Name {
+				if entry.PodName == matchKey {
 					network.IPRequest = []string{entry.Address}
-					klog.V(5).Infof("Matched static IP %s for pod %s via podName lookup", entry.Address, podDesc)
+					klog.Infof("DEBUG-HACKCTF: matched static IP %s for pod %s via %s key=%q", entry.Address, podDesc, matchVia, matchKey)
 					break
 				}
 			}
@@ -974,11 +995,12 @@ func (bnc *BaseNetworkController) allocatePodAnnotationForSecondaryNetwork(pod *
 	// For flat L2: if no match found, error occurs later (no subnet to allocate from).
 	// For L2 with subnets: if no match found, IPAM allocates from subnet (DHCP fallback).
 	if len(network.IPRequest) == 0 {
+		matchKey, matchVia := staticIPMatchKey(pod)
 		staticIPs := bnc.GetStaticIPs()
 		for _, entry := range staticIPs {
-			if entry.PodName == pod.Name {
-				klog.Infof("DEBUG-HACKCTF: MATCHED static IP %s gw=%s for pod %s/%s net=%s via podName lookup",
-					entry.Address, entry.Gateway, pod.Namespace, pod.Name, nadName)
+			if entry.PodName == matchKey {
+				klog.Infof("DEBUG-HACKCTF: MATCHED static IP %s gw=%s for pod %s/%s net=%s via %s key=%q",
+					entry.Address, entry.Gateway, pod.Namespace, pod.Name, nadName, matchVia, matchKey)
 				network.IPRequest = []string{entry.Address}
 				if gw := net.ParseIP(entry.Gateway); gw != nil {
 					network.GatewayRequest = []net.IP{gw}
