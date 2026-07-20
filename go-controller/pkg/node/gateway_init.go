@@ -623,52 +623,140 @@ func (nc *DefaultNodeNetworkController) updateGatewayMAC(link netlink.Link) erro
 // Safety: only bridges with the `bridge-uplink` external-id set are
 // touched, so internal bridges (br-int) and any unrelated OVS bridges
 // are not affected.
+// cleanupStaleGatewayBridges removes any stale breth* gateway bridges left over
+// from a previous GatewayModeLocal/Shared deployment, retried over a short
+// window.
+//
+// Why the retry: the original single-shot implementation ran once, ~2s into
+// ovnkube-node startup, and could observe "no stale bridges" even though
+// breth0/breth1 were present in OVS — leaving the physical uplink (eth1/eth0)
+// enslaved and the node unreachable. Two causes were seen: (a) the stale bridge
+// was not yet enumerable at that instant, and (b) a half-created bridge lacked
+// the `bridge-uplink` external-id and was silently skipped by the old guard. A
+// live local->disabled transition therefore left the bridges behind and needed
+// a manual `ovs-vsctl del-br`.
+//
+// This version scans repeatedly for up to `window`, only declaring success
+// after two consecutive fully-clean passes (defeating the race), targets every
+// breth* bridge by name (the prefix is already the safety filter — br-int,
+// br-lab-trunk and any other bridge are never touched), and force-deletes a
+// bridge when BridgeToNic fails but it is provably safe (the node IP is already
+// on the physical NIC, or the bridge holds no global IP to strand).
 func cleanupStaleGatewayBridges() error {
-	stdout, stderr, err := util.RunOVSVsctl("list-br")
-	if err != nil {
-		return fmt.Errorf("failed to list OVS bridges: stderr=%q err=%v", stderr, err)
+	const (
+		pollInterval = 3 * time.Second
+		window       = 45 * time.Second
+	)
+	deadline := time.Now().Add(window)
+	consecutiveClean := 0
+	for pass := 1; ; pass++ {
+		cleaned, remaining, err := removeStaleGatewayBridgesOnce()
+		switch {
+		case err != nil:
+			klog.Warningf("HackCTF fix: stale gateway bridge scan pass %d failed (continuing): %v", pass, err)
+			consecutiveClean = 0
+		case cleaned == 0 && remaining == 0:
+			consecutiveClean++
+			if consecutiveClean >= 2 {
+				klog.Infof("HackCTF fix: no stale gateway bridges present (confirmed over %d passes)", pass)
+				return nil
+			}
+		default:
+			klog.Infof("HackCTF fix: stale gateway bridge scan pass %d: removed=%d still-present=%d", pass, cleaned, remaining)
+			consecutiveClean = 0
+		}
+		if time.Now().After(deadline) {
+			if consecutiveClean < 2 {
+				klog.Warningf("HackCTF fix: cleanup window (%s) elapsed; stale gateway bridges may still be present", window)
+			}
+			return nil
+		}
+		time.Sleep(pollInterval)
 	}
-	bridges := strings.Split(strings.TrimSpace(stdout), "\n")
-	if len(bridges) == 0 || (len(bridges) == 1 && bridges[0] == "") {
-		klog.Info("HackCTF fix: no OVS bridges found, nothing to clean up")
-		return nil
-	}
+}
 
-	cleaned := 0
-	for _, br := range bridges {
+// removeStaleGatewayBridgesOnce scans OVS once and attempts to remove every
+// breth* bridge. It returns how many were removed and how many are still
+// present (could not be removed this pass). Only the breth* naming convention
+// from util.GetBridgeName is ever touched.
+func removeStaleGatewayBridgesOnce() (cleaned int, remaining int, err error) {
+	stdout, stderr, lerr := util.RunOVSVsctl("list-br")
+	if lerr != nil {
+		return 0, 0, fmt.Errorf("failed to list OVS bridges: stderr=%q err=%v", stderr, lerr)
+	}
+	for _, br := range strings.Split(strings.TrimSpace(stdout), "\n") {
 		br = strings.TrimSpace(br)
-		if br == "" {
+		if br == "" || !strings.HasPrefix(br, "breth") {
 			continue
 		}
-		// Only target the `breth*` gateway bridge naming convention
-		// produced by util.GetBridgeName (e.g. breth0, breth1).
-		if !strings.HasPrefix(br, "breth") {
-			continue
-		}
-		// Confirm this bridge was created by NicToBridge() by checking
-		// for the `bridge-uplink` external-id; skip if absent to avoid
-		// touching unrelated bridges.
-		uplink, _, lerr := util.RunOVSVsctl("br-get-external-id", br, "bridge-uplink")
-		if lerr != nil {
-			klog.Warningf("HackCTF fix: could not query bridge-uplink on %q, skipping (err=%v)", br, lerr)
-			continue
-		}
-		if uplink == "" {
-			klog.V(5).Infof("HackCTF fix: bridge %q has no bridge-uplink external-id, skipping", br)
-			continue
-		}
-		klog.Infof("HackCTF fix: removing stale gateway bridge %q (uplink=%q)", br, uplink)
-		if err := util.BridgeToNic(br); err != nil {
-			klog.Errorf("HackCTF fix: failed to remove stale gateway bridge %q: %v", br, err)
+		if rerr := removeOneStaleGatewayBridge(br); rerr != nil {
+			klog.Warningf("HackCTF fix: could not remove stale gateway bridge %q this pass: %v", br, rerr)
+			remaining++
 			continue
 		}
 		cleaned++
 	}
+	return cleaned, remaining, nil
+}
 
-	if cleaned == 0 {
-		klog.Info("HackCTF fix: no stale gateway bridges required cleanup")
+// removeOneStaleGatewayBridge removes a single breth* gateway bridge, moving the
+// node IP back onto the physical uplink first. It prefers util.BridgeToNic
+// (which relocates the bridge's IPs/routes to the uplink NIC and then deletes
+// the bridge). If BridgeToNic fails but the bridge is still present, it
+// force-deletes it only when that will not strand the node IP: either the
+// uplink NIC already carries a global IP, or the bridge holds no global IP.
+// This mirrors the manual recovery (ovs-vsctl del-br breth1) that restores
+// connectivity once the IP is on the physical NIC.
+func removeOneStaleGatewayBridge(br string) error {
+	uplink, _, _ := util.RunOVSVsctl("br-get-external-id", br, "bridge-uplink")
+	uplink = strings.TrimSpace(uplink)
+	klog.Infof("HackCTF fix: removing stale gateway bridge %q (uplink=%q)", br, uplink)
+
+	if err := util.BridgeToNic(br); err == nil {
+		return nil
 	} else {
-		klog.Infof("HackCTF fix: removed %d stale gateway bridge(s)", cleaned)
+		klog.Warningf("HackCTF fix: BridgeToNic(%q) failed: %v", br, err)
 	}
-	return nil
+
+	if !ovsBridgeExists(br) {
+		// BridgeToNic already deleted the bridge before erroring elsewhere.
+		return nil
+	}
+
+	uplinkHasIP := uplink != "" && interfaceHasGlobalIP(uplink)
+	bridgeHasIP := interfaceHasGlobalIP(br)
+	if uplinkHasIP || !bridgeHasIP {
+		if _, stderr, err := util.RunOVSVsctl("--", "--if-exists", "del-br", br); err != nil {
+			return fmt.Errorf("force del-br %q failed: stderr=%q err=%v", br, stderr, err)
+		}
+		klog.Infof("HackCTF fix: force-deleted stale gateway bridge %q (uplinkHasIP=%v bridgeHasIP=%v)", br, uplinkHasIP, bridgeHasIP)
+		return nil
+	}
+	return fmt.Errorf("bridge %q still present and unsafe to force-delete (uplink %q not yet carrying node IP); will retry", br, uplink)
+}
+
+// ovsBridgeExists reports whether the named OVS bridge currently exists.
+func ovsBridgeExists(br string) bool {
+	_, _, err := util.RunOVSVsctl("br-exists", br)
+	return err == nil
+}
+
+// interfaceHasGlobalIP reports whether the given link has at least one global
+// (non-link-local, non-loopback) unicast IP. Used to decide when it is safe to
+// delete a gateway bridge without stranding the node IP.
+func interfaceHasGlobalIP(name string) bool {
+	link, err := netlink.LinkByName(name)
+	if err != nil {
+		return false
+	}
+	addrs, err := netlink.AddrList(link, netlink.FAMILY_ALL)
+	if err != nil {
+		return false
+	}
+	for _, a := range addrs {
+		if a.IP.IsGlobalUnicast() && !a.IP.IsLinkLocalUnicast() {
+			return true
+		}
+	}
+	return false
 }

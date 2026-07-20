@@ -166,7 +166,13 @@ spec:
             fieldRef:
               fieldPath: status.hostIP
         - name: OVN_GATEWAY_MODE
-          value: "{{ ovn_gateway_mode }}"
+          # HackCTF: gateway mode is PINNED to disabled (""). Do not template
+          # this from ovn_gateway_mode: in shared/local mode OVN-K enslaves the
+          # node uplink (eth1) into breth1, which on this VirtualBox host-only
+          # substrate strands the node IP and breaks SSH/kubectl. Labs ride OVN
+          # secondary networks (Geneve) and need no gateway bridge. To ever run
+          # a real north-south gateway, add a dedicated NIC and revert this pin.
+          value: ""
         - name: OVN_GATEWAY_OPTS
           value: "{{ ovn_gateway_opts }}"
         - name: OVN_HYBRID_OVERLAY_ENABLE

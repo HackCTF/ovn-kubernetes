@@ -158,7 +158,13 @@ spec:
             fieldRef:
               fieldPath: status.hostIP
         - name: OVN_GATEWAY_MODE
-          value: {{ default "shared" .Values.global.gatewayMode }}
+          # HackCTF: default to "" (GatewayModeDisabled), NOT "shared". In
+          # shared/local mode OVN-K runs NicToBridge() and enslaves the node
+          # uplink (eth1) into breth1; on this VirtualBox host-only substrate
+          # that strands the node IP and breaks SSH/kubectl. Labs use OVN
+          # secondary networks (Geneve), which need no gateway bridge. Only set
+          # gatewayMode to shared/local with a dedicated (non-management) NIC.
+          value: {{ default "" .Values.global.gatewayMode | quote }}
         - name: OVN_GATEWAY_OPTS
           value: {{ default "" .Values.global.gatewayOps | quote }}
         - name: OVN_HYBRID_OVERLAY_ENABLE
