@@ -39,6 +39,39 @@ OVN construye ese bridge con `util.NicToBridge()`
 ClusterIP, y las **secondary networks** de los labs (OVN layer2 / Geneve). Esos
 van por `br-int` / los túneles Geneve directamente.
 
+### Por qué OVN-K necesita un gateway (y por qué el default es `shared`)
+
+OVN-Kubernetes construye una **red overlay** (Geneve): las IPs de pod
+(`10.244.x.x`) son internas al overlay y **la red física no sabe rutearlas**. Todo
+lo que cruza el borde entre el overlay OVN y la red física/host necesita un punto
+de traducción/routing — ése es el **gateway** (GR + `breth`). Existe para dos cosas:
+
+- **Egress de pods al exterior**: la IP origen del pod no es ruteable fuera del
+  cluster → hay que hacer **SNAT** a la IP del nodo y sacar el tráfico por la NIC
+  física.
+- **Ingress de servicios expuestos** (NodePort / ExternalIP / LoadBalancer): el
+  cliente externo llega a `IP-del-nodo:puerto`; ese tráfico entra por la NIC física
+  y hay que **DNAT / balancearlo** hacia un pod del overlay. El gateway es el punto
+  donde OVN programa esos load balancers de servicio.
+
+Lo que **NO** necesita gateway es el este-oeste: **ClusterIP** se implementa como
+load balancer en los logical switches/router **dentro del overlay** (por eso anda
+en disabled), y pod↔pod va por `br-int`/Geneve.
+
+Por eso el **default upstream es `shared`**: un cluster Kubernetes "normal" da por
+sentado que necesita norte-sur (services externos, egress con SNAT), y `shared` es
+el camino más simple y performante — OVN dueña de todo el datapath, sin hairpin por
+el host. `local` existe para meter el kernel del host en el camino (aplicar
+routing/políticas host-level al egress). **Ninguno de los dos contempla "sin
+gateway"**: por eso `disabled` no es de primera clase upstream (lo coercionan a
+`shared`; ver más abajo).
+
+> En Combate `disabled` es viable porque el norte-sur que realmente se usa —el
+> ingress a las consolas de los labs— lo resuelve **MetalLB (L2) + Traefik**, no el
+> gateway OVN; y los labs viven en secondary networks L2 aisladas (Geneve), no en la
+> red default. El egress de pod igual funciona (lo resuelve el stack del nodo), pero
+> el **ingress tipo NodePort/LB por OVN no** — de ahí MetalLB.
+
 ### Los tres valores (fuente: `config.go:444-448`, `1417-1419`, `1924-1935`)
 
 | Valor (`GatewayMode`) | Datapath de egress de la red default | ¿`NicToBridge()` → `breth` + enslave uplink? |
@@ -50,6 +83,68 @@ van por `br-int` / los túneles Geneve directamente.
 El branch está en `newGateway()` (`gateway_shared_intf.go:1432`): `local` llama
 `initLocalGateway()` antes del `gatewayInitInternal()` común; `shared` sólo el común;
 `disabled` no construye ninguno (arma un `gateway` stub sin bridge ni openflowManager).
+
+### Diagramas: datapath por modo
+
+Leyenda: `br-int` = OVS integration bridge (overlay) · `breth1` = gateway/ext
+bridge · `GR` = OVN gateway router (SNAT/DNAT, lógico) · `mp0` = `ovn-k8s-mp0`
+(management port host↔overlay) · `eth1` = uplink físico del nodo.
+
+**`shared`** — OVN dueña del norte-sur (default upstream):
+
+```
+  ┌──────────────────────────── nodo ────────────────────────────┐
+  │  pod ──veth──▶ br-int ══patch══▶ breth1 ──▶ eth1 ────────────────▶ red física / internet
+  │ 10.244.x      (overlay)      (GR: SNAT)   (uplink            │     egress: SNAT a IP nodo
+  │                  │            IP nodo      enslavado)         │
+  │                  │            vive acá)                       │
+  │               Geneve ─────────────────────────────────────────────▶ otros nodos (E-W)
+  └───────────────────────────────────────────────────────────────┘
+  ingress:  red física ─▶ eth1 ─▶ breth1 (GR: DNAT/LB de Service) ─▶ br-int ─▶ pod
+```
+
+**`local`** — el egress hace hairpin por el kernel del host:
+
+```
+  ┌──────────────────────────── nodo ────────────────────────────┐
+  │  pod ──veth──▶ br-int ──▶ mp0 ──▶ [ KERNEL DEL HOST ]         │
+  │ 10.244.x      (overlay)  (ovn-    iptables/nft masquerade     │
+  │                          k8s-mp0) + tabla de rutas del host   │
+  │                                          │                    │
+  │                                          ▼                    │
+  │                                        eth1 ────────────────────▶ red física / internet
+  │  (breth1 se crea igual; el uplink eth1 sigue enslavado)       │
+  └───────────────────────────────────────────────────────────────┘
+```
+
+**`disabled`** (`""`) — sin gateway; lo que corre en Combate:
+
+```
+  ┌──────────────────────────── nodo ────────────────────────────┐
+  │  pod ──veth──▶ br-int ──Geneve──────────────────────────────────▶ otros nodos (E-W, labs L2)
+  │ 10.244.x      (overlay)                                       │
+  │                  └─ ClusterIP (LB en el logical switch) ✅    │
+  │                                                               │
+  │  eth1 ── IP nodo 192.168.56.140 ── management / API / SSH     │   NIC física PLANA:
+  │                                                               │   sin breth, sin enslave
+  └───────────────────────────────────────────────────────────────┘
+  ✗ sin breth/GR  →  NodePort/ExternalIP/LB por OVN NO disponibles
+  ingress externo:  red física ─▶ MetalLB (L2) ─▶ Traefik ─▶ Service ─▶ pod
+```
+
+**Por qué `shared`/`local` rompen en VirtualBox host-only** (el incidente): `eth1`
+es a la vez el uplink enslavado (puerto de `breth1`) y el único camino de
+management.
+
+```
+  Estado SANO   (IP .140 en breth1):
+     worker ─▶ eth1 ─▶ [OVS] ─▶ LOCAL(breth1)=IP .140 ─▶ host   ✅
+
+  Estado ROTO   (IP .140 quedó en eth1, la esclava):
+     worker ─▶ eth1 (puerto de OVS) ─▶ [OVS] ─▶ intenta reenviar a eth1 ─▶ LOOP ─▶ DROP
+     (el kernel routea las replies por eth1; conntrack ct(zone=64000) las descarta
+      antes de llegar a LOCAL)  →  nodo / control-plane inalcanzable
+```
 
 ### Qué gana/pierde disabled en ESTE cluster (verificado en vivo, 2026-07-20)
 
