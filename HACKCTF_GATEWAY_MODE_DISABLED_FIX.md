@@ -182,6 +182,44 @@ por eso disabled es viable para este cluster de labs.
 - **Panics del binario en disabled**: upstream asume que siempre hay gateway;
   deref nil de `openflowManager`/`defaultBridge`. Guardas agregadas en `bacdbdc`.
 
+### ¿El gateway requiere dos NICs físicas?
+
+**No.** `shared`/`local` funcionan con **una sola NIC** — es su diseño.
+`NicToBridge()` hace que el host y OVN **compartan** esa NIC:
+- crea `breth<uplink>`, enslava la NIC física como puerto, y **mueve la IP del nodo
+  a la interfaz interna `breth`**;
+- desde ahí `breth` **es** la interfaz del nodo: el host manda/recibe por `breth` y
+  OVS reenvía a la NIC física con sus flows. Management y gateway OVN comparten
+  `breth`; el host no pierde conectividad porque la IP vive en `breth`.
+
+Es el setup estándar soportado (p.ej. OpenShift por default: `br-ex` sobre la NIC
+primaria, **una sola**).
+
+**Lo que rompió en Combate NO fue el número de NICs.** En este sustrato
+(VirtualBox host-only / e1000) el paso "mover la IP a `breth` + programar los flows"
+es **frágil**: la IP quedaba en `eth1` (esclava) en vez de `breth1`, o el OVS del
+host recreaba `breth1` desde su db en el boot **antes** de que `ovnkube-node`
+completara el setup → sin flows → loop → drop. Es una falla de robustez de
+`NicToBridge` en ese sustrato, no un requisito de hardware.
+
+**Dónde entran las dos NICs: como blindaje, no como requisito.** El problema real de
+Combate es que el uplink de OVN y el **único** camino de management son la misma NIC
+(`eth1`) — cualquier fragilidad del gateway se lleva puesto el SSH/API. Con dos NICs
+se dedica una a OVN (`--gateway-interface=eth2`) y `eth1` queda pura para management:
+si el gateway falla, el management **nunca se toca**. Es el patrón de datacenter
+(NIC provider/uplink dedicada, separada de la de management).
+
+| Escenario | ¿2 NICs? | Por qué |
+|---|---|---|
+| Gateway `shared`/`local` (diseño) | **No** | Comparte 1 NIC moviendo la IP a `breth` |
+| Gateway `shared` **robusto** cuando esa NIC es también management | **Recomendado 2** | Aísla el uplink de OVN del camino de SSH/API |
+| Combate (elegido) | **No** → `disabled` | Sin gateway; no se enslava ninguna NIC; norte-sur por MetalLB+Traefik |
+
+Para no perder el nodo había dos salidas: (a) NIC dedicada a OVN + `shared` sano, o
+(b) `disabled` (sin gateway). Se eligió **(b)** porque el cluster no necesita el
+norte-sur de OVN; **(a)** queda como opción si algún día se requieren NodePort o
+EgressIP nativos de OVN.
+
 ## Incidente 2026-07-20
 
 El DS `ovnkube-node` amaneció con **`OVN_GATEWAY_MODE=local`** (seteado por un
