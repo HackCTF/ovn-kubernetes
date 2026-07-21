@@ -1,7 +1,8 @@
 # HackCTF: topología del cluster Combate (OVN-K + MetalLB + Traefik + labs)
 
 Vista de ingeniería de cómo encaja la red del cluster de labs, con OVN-Kubernetes en
-`GatewayModeDisabled` (sin gateway bridge). Datos verificados en vivo 2026-07-20.
+`GatewayModeDisabled` (sin gateway bridge). Datos verificados en vivo 2026-07-21
+(post-recuperación de `funny-einstein`).
 
 ## Nodos
 
@@ -9,10 +10,25 @@ Vista de ingeniería de cómo encaja la red del cluster de labs, con OVN-Kuberne
 |------|-------------|-----|--------|
 | thirsty-kapitsa | 192.168.56.140 | control-plane (API, etcd) + OVN NB/SB db | ✅ Ready |
 | nervous-vaughan | 192.168.56.142 | worker (labs, VMs) | ✅ Ready |
-| funny-einstein | 192.168.56.141 | worker | ❌ muerto (NotReady) |
+| funny-einstein | 192.168.56.141 | worker (labs, VMs) | ✅ Ready (recuperado 2026-07-21) |
 
 Red física: host-only `192.168.56.0/24` (management/API + MetalLB) + NAT `10.0.2.0/24`
 (egress). NIC `e1000` (una cola RX). Host Windows con VirtualBox.
+
+### Storage por nodo (post-recuperación)
+
+| Nodo | OS disk | Container storage | LVM (topolvm) |
+|------|---------|-------------------|---------------|
+| thirsty-kapitsa | /dev/sda (20 GB) | /dev/sda4 (rootfs) | /dev/sdc (300 GB) |
+| funny-einstein | /dev/sda (20 GB) | **/dev/sdd (200 GB XFS) montado en `/var/lib/containers/storage`** | /dev/sdc (300 GB) |
+| nervous-vaughan | /dev/sda (20 GB) | /dev/sdd (200 GB XFS) montado en `/var/lib/containers/storage` | /dev/sdc (300 GB) |
+
+`funny-einstein` recuperó su nodo tras corrupción del VDI de 200G durante un
+`Move-Item` entre discos NTFS distintos (ver `D:\HackCTF\Vms\AGENTS.md` sesión
+v2.16.1). El VDI fue reemplazado y el storage re-formateado con el mismo patrón
+que `nervous-vaughan` (XFS en `sdd` montado vía fstab con `defaults,nofail`).
+NIC interface names cambiaron a `enp0s3` (NAT) / `enp0s8` (host-only) tras el
+recovery (antes `eth0`/`eth1` en nervous-vaughan).
 
 ## Capa 1 — Plano de datos OVN (este-oeste, disabled)
 
@@ -22,16 +38,19 @@ túneles **Geneve** entre nodos. Componentes (namespace `ovn-kubernetes`):
 `ovnkube-master` (Deploy, cluster-manager), `ovnkube-db` (Deploy, NB/SB), `ovnkube-identity`.
 
 ```
-        thirsty-kapitsa (.140)              nervous-vaughan (.142)
-   ┌───────────────────────────┐      ┌───────────────────────────┐
-   │  pods ─veth─▶ br-int      │      │      br-int ◀─veth─ pods   │
-   │              (overlay)    │      │      (overlay)            │
-   │                 │         │      │         │                 │
-   │              Geneve ══════╪══════╪═════════ Geneve           │  ◄── E-W entre nodos
-   │                           │      │                           │      (UDP 6081)
-   │  eth1 .140 (management)   │      │   eth1 .142 (management)   │  ◄── NIC física PLANA,
-   │  eth0 (NAT egress)        │      │   eth0 (NAT egress)        │      sin breth, sin enslave
-   └───────────────────────────┘      └───────────────────────────┘
+         thirsty-kapitsa (.140)              nervous-vaughan (.142)              funny-einstein (.141)
+   ┌───────────────────────────┐      ┌───────────────────────────┐      ┌───────────────────────────┐
+   │  pods ─veth─▶ br-int      │      │      br-int ◀─veth─ pods   │      │      br-int ◀─veth─ pods   │
+   │              (overlay)    │      │      (overlay)            │      │      (overlay)            │
+   │                 │         │      │         │                 │      │         │                 │
+   │              Geneve ══════╪══════╪═════════ Geneve           │══════╪═════════ Geneve           │  ◄── E-W entre nodos
+   │                           │      │                           │      │                           │      (UDP 6081)
+   │  enp0s8 .140 (mgmt)       │      │   enp0s8 .142 (mgmt)       │      │   enp0s8 .141 (mgmt)       │  ◄── NIC física PLANA,
+   │  enp0s3 (NAT egress)      │      │   enp0s3 (NAT egress)      │      │   enp0s3 (NAT egress)      │      sin breth, sin enslave
+   │  /dev/sda (20G, rootfs)   │      │   /dev/sda (20G, rootfs)   │      │   /dev/sda (20G, rootfs)   │  ◄── OS disk
+   │  /dev/sdd (200G, no LVM)  │      │   /dev/sdd (200G, storage) │      │   /dev/sdd (200G, storage) │  ◄── container storage
+   │  /dev/sdc (300G, topolvm) │      │   /dev/sdc (300G, topolvm) │      │   /dev/sdc (300G, topolvm) │      XFS en sdd, vg en sdc
+   └───────────────────────────┘      └───────────────────────────┘      └───────────────────────────┘
 ```
 
 Lo que da OVN sin gateway: pod↔pod, **ClusterIP** (LB en el logical switch),
