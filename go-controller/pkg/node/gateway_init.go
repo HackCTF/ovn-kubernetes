@@ -253,7 +253,32 @@ func (nc *DefaultNodeNetworkController) initGatewayPreStart(
 
 	gatewayNextHops, gatewayIntf, err := getGatewayNextHops()
 	if err != nil {
-		return nil, err
+		// HackCTF fix: in GatewayModeDisabled the gateway next-hops are never
+		// used (no gateway bridge is built), so a missing default route must
+		// NOT be fatal. getGatewayNextHops() returns "unable to find default
+		// gateway" when the node has no default route (e.g. after a crashed
+		// gateway transition) and would otherwise crashloop the node here,
+		// before anything could recover it. Fall back to the interface that
+		// carries the node's primary IP so the node-primary-ifaddr annotation
+		// can still be set, and continue with no next-hops.
+		if config.Gateway.Mode != config.GatewayModeDisabled {
+			return nil, err
+		}
+		klog.Warningf("HackCTF fix: getGatewayNextHops failed in disabled mode (%v); "+
+			"falling back to the node-IP interface", err)
+		node, nerr := nc.watchFactory.GetNode(nc.name)
+		if nerr != nil {
+			return nil, fmt.Errorf("disabled-mode gateway fallback: get node %q: %w", nc.name, nerr)
+		}
+		nodeIP, nerr := util.GetNodePrimaryIP(node)
+		if nerr != nil {
+			return nil, fmt.Errorf("disabled-mode gateway fallback: node primary IP: %w", nerr)
+		}
+		gatewayIntf, nerr = getInterfaceByIP(net.ParseIP(nodeIP))
+		if nerr != nil {
+			return nil, fmt.Errorf("disabled-mode gateway fallback: interface for node IP %s: %w", nodeIP, nerr)
+		}
+		gatewayNextHops = nil
 	}
 
 	egressGWInterface := ""

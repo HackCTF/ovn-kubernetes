@@ -77,6 +77,17 @@ gateway` y el node controller crashea **antes** de llegar al cleanup → loop. F
 antes de `getGatewayNextHops()`, cuando el modo es disabled. Así limpia el breth
 (restaurando IP/ruta al uplink) y recién ahí detecta el next-hop.
 
+**(b.3) `getGatewayNextHops()` no fatal en disabled** (fix de raíz del crash): en
+`GatewayModeDisabled` el next-hop NUNCA se usa (no se arma gateway bridge), pero
+`getGatewayNextHops()` abortaba con `unable to find default gateway` (gateway_init.go:94)
+si el nodo no tenía ruta default — crasheando el node controller. Ahora, en
+disabled, ese error **no es fatal**: se deriva `gatewayIntf` de la IP primaria del
+nodo (`util.GetNodePrimaryIP` → `getInterfaceByIP`, mismo patrón que el modo DPU)
+y se continúa con next-hops vacíos. Resultado: **el nodo nunca revienta por falta
+de ruta default en disabled**, tenga o no un breth stale. Defensa en profundidad
+con (b.2): (b.2) limpia el breth y restaura la ruta; (b.3) evita el crash aunque
+la ruta siga faltando.
+
 Nota: en **reboot** el cleanup manual no hace falta porque `ovs-node` usa
 `emptyDir` en `/etc/origin/openvswitch` (db OVS fresca, sin `breth*` stale). El
 fix (b) cubre además la transición **en vivo**.
