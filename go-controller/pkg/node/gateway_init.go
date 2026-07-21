@@ -237,6 +237,20 @@ func (nc *DefaultNodeNetworkController) initGatewayPreStart(
 
 	waiter := newStartupWaiter()
 
+	// HackCTF fix: in GatewayModeDisabled, remove any stale breth* gateway
+	// bridges left by a previous local/shared run (or a crashed transition)
+	// BEFORE getGatewayNextHops(). Such a bridge enslaves the physical uplink
+	// and can break the node's default route; getGatewayNextHops() would then
+	// fail with "unable to find default gateway" and crash the node controller
+	// before the disabled-mode cleanup could ever run. Cleaning up first
+	// restores the uplink IP/route so next-hop detection can succeed. It also
+	// covers the reboot case (host OVS recreates persisted bridges pre-boot).
+	if config.Gateway.Mode == config.GatewayModeDisabled {
+		if err := cleanupStaleGatewayBridges(); err != nil {
+			klog.Warningf("HackCTF fix: early stale gateway bridge cleanup returned error (continuing): %v", err)
+		}
+	}
+
 	gatewayNextHops, gatewayIntf, err := getGatewayNextHops()
 	if err != nil {
 		return nil, err
@@ -280,18 +294,11 @@ func (nc *DefaultNodeNetworkController) initGatewayPreStart(
 	case config.GatewayModeDisabled:
 		var chassisID string
 		klog.Info("Gateway Mode is disabled")
-
-		// HackCTF fix: clean up any stale OVS gateway bridges (e.g. breth1)
-		// that may have been created by a previous deployment with
-		// GatewayModeLocal or GatewayModeShared. When the OVS db has these
-		// bridges persisted, the OVS host daemon recreates them on every
-		// boot BEFORE the ovnkube-node pod starts, which enslaves the
-		// physical uplink (e.g. eth1) and breaks host networking. Cleaning
-		// them up here ensures they are removed from both the running OVS
-		// state and the persistent db, so future boots start clean.
-		if err := cleanupStaleGatewayBridges(); err != nil {
-			klog.Warningf("HackCTF fix: stale gateway bridge cleanup returned error (continuing): %v", err)
-		}
+		// Note: stale breth* gateway bridge cleanup now runs earlier, before
+		// getGatewayNextHops() (see the HackCTF fix above), so a stale bridge
+		// that broke the default route cannot crash the controller before we
+		// clean it up. cleanupStaleGatewayBridges() is intentionally not
+		// called again here.
 
 		gw = &gateway{
 			initFunc:     func() error { return nil },

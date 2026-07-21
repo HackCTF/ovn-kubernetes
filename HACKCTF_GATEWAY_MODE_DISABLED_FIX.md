@@ -67,9 +67,36 @@ Nueva implementación:
 Funciones nuevas: `removeStaleGatewayBridgesOnce`, `removeOneStaleGatewayBridge`,
 `ovsBridgeExists`, `interfaceHasGlobalIP`.
 
+**(b.2) Cleanup ANTES de `getGatewayNextHops()`** (descubierto validando en vivo,
+2026-07-20): el cleanup estaba en el `case GatewayModeDisabled`, que corre
+DESPUÉS de `getGatewayNextHops()` (gateway_init.go:240). Si un breth stale
+enslavó el uplink y **rompió la default route** (p.ej. una transición a local
+que crasheó a mitad), `getGatewayNextHops()` falla con `unable to find default
+gateway` y el node controller crashea **antes** de llegar al cleanup → loop. Fix:
+`cleanupStaleGatewayBridges()` ahora corre al inicio de `initGatewayPreStart`,
+antes de `getGatewayNextHops()`, cuando el modo es disabled. Así limpia el breth
+(restaurando IP/ruta al uplink) y recién ahí detecta el next-hop.
+
 Nota: en **reboot** el cleanup manual no hace falta porque `ovs-node` usa
 `emptyDir` en `/etc/origin/openvswitch` (db OVS fresca, sin `breth*` stale). El
 fix (b) cubre además la transición **en vivo**.
+
+## Evidencia de validación en vivo (2026-07-20, cluster Combate)
+
+Con `hackctf-v22` desplegado (DS `ovnkube-node` + Deployment `ovnkube-master`):
+- Master y worker corren el código nuevo: log `HackCTF fix: no stale gateway
+  bridges present (confirmed over 2 passes)`.
+- **Auto-remoción probada end-to-end** en nervous-vaughan: se creó un breth0
+  stale (uplink dummy + IP global), se roló el pod en disabled, y v22 lo borró
+  solo:
+  ```
+  gateway_init.go:713] HackCTF fix: removing stale gateway bridge "breth0" (uplink="breth0up")
+  nicstobridge.go:355] Successfully deleted OVS bridge "breth0"
+  gateway_init.go:665] HackCTF fix: stale gateway bridge scan pass 1: removed=1 still-present=0
+  ```
+  Post: `list-br` sin breth0, pod `Running true,true,true`, sin `del-br` manual.
+- El fix (b.2) sale en la próxima imagen (`hackctf-v23`); v22 ya cubre el caso
+  del incidente real (local mode con breth + ruta funcionando).
 
 ## Build y deploy
 
