@@ -17,30 +17,75 @@ entrypoint `ovnkube.sh` reescribe vacío→`"shared"` (ya parcheado con `sed` en
 ya agregadas en `default_node_network_controller.go` / `openflow_manager.go` /
 `gateway_init.go`). Ver commit `bacdbdc` (fix gateway-mode).
 
-## Valores de `OVN_GATEWAY_MODE` (referencia)
+## Modos de `OVN_GATEWAY_MODE`
 
-Es el flag estándar de OVN-Kubernetes `--gateway-mode` (env `OVN_GATEWAY_MODE`).
-**Fuente autoritativa:** `go-controller/pkg/config/config.go`:
-- Constantes (líneas 444-448):
-  `GatewayModeDisabled = ""`, `GatewayModeShared = "shared"`, `GatewayModeLocal = "local"`.
-- Usage del flag (líneas 1417-1419): *"Sets the cluster gateway mode. One of
-  \"shared\", or \"local\". If not given, gateway functionality is disabled."*
-- Validación (líneas 1924-1925): `validModes = ["shared","local"]` (vacío = disabled).
+Flag estándar de OVN-Kubernetes `--gateway-mode` (env `OVN_GATEWAY_MODE`).
 
-| Valor | Constante Go | ¿Crea `breth*` / enslava uplink? | Uso |
-|-------|-------------|----------------------------------|-----|
-| `""` (vacío) | `GatewayModeDisabled` | **NO** | **HackCTF/Combate.** Sin gateway bridge; la IP del nodo queda en la NIC física (eth1). Labs L2/Geneve no lo necesitan. |
-| `"shared"` | `GatewayModeShared` | **SÍ** | Un gateway bridge compartido por todos los pods del nodo (default upstream). |
-| `"local"` | `GatewayModeLocal` | **SÍ** | Gateway por nodo, routing via host. |
+### Qué es el "gateway" y qué NO depende de él
 
-**Clave del incidente:** tanto `shared` como `local` corren `NicToBridge()` → crean
-`breth` y **esclavizan el uplink** (eth1). En el sustrato VirtualBox/host-only eso
-atrapa la IP del nodo detrás de OVS y lo deja inalcanzable. Sólo `""` (disabled)
-evita el enslavement — por eso la fuente está pinneada a `""`.
+El gateway maneja el tráfico **norte-sur de la red default (`eth0` del pod)**:
+egress de pods hacia afuera del cluster e ingress de servicios expuestos
+(NodePort / ExternalIP / LoadBalancer). Se materializa como un **OVN gateway
+router (GR)** conectado a un **bridge externo `breth<uplink>`**.
 
-> Upstream, `""` no es del todo "primera clase": `ovnkube.sh` reescribía
-> vacío→`"shared"` (parcheado con `sed`) y el binario paniqueaba sin gateway
-> bridge (guardas nil agregadas). Ver commit `bacdbdc`.
+OVN construye ese bridge con `util.NicToBridge()`
+(`go-controller/pkg/util/nicstobridge.go`):
+1. crea `breth<uplink>` (`add-br`),
+2. **agrega la NIC física como puerto del bridge** (`add-port breth eth1`) — el enslave,
+3. **mueve la IP del nodo y sus rutas** de la NIC a la interfaz interna `breth`,
+4. crea un patch `breth ↔ br-int`.
+
+**No pasan por el gateway** (funcionan sin él): tráfico este-oeste pod↔pod,
+ClusterIP, y las **secondary networks** de los labs (OVN layer2 / Geneve). Esos
+van por `br-int` / los túneles Geneve directamente.
+
+### Los tres valores (fuente: `config.go:444-448`, `1417-1419`, `1924-1935`)
+
+| Valor (`GatewayMode`) | Datapath de egress de la red default | ¿`NicToBridge()` → `breth` + enslave uplink? |
+|---|---|---|
+| `"shared"` | pod → `br-int` → GR → `breth` → uplink físico. **OVN rutea y hace SNAT en su propio datapath**; host y OVN comparten `breth`. Es el default upstream. | **SÍ** |
+| `"local"` | Igual que shared para armar `breth`, **pero además** corre `initLocalGateway()` (`gateway_localnet.go:18`): el egress se deriva al **kernel del host** vía la management port `ovn-k8s-mp0` con **masquerade iptables/nftables**, y sale por la **tabla de rutas del host**. Permite aplicar routing/políticas host-level al tráfico de pods. | **SÍ** |
+| `""` (vacío = `GatewayModeDisabled`) | No se crea GR ni `breth`. No hay gateway OVN para la red default. La IP del nodo queda en la NIC física (`eth1`). | **NO** |
+
+El branch está en `newGateway()` (`gateway_shared_intf.go:1432`): `local` llama
+`initLocalGateway()` antes del `gatewayInitInternal()` común; `shared` sólo el común;
+`disabled` no construye ninguno (arma un `gateway` stub sin bridge ni openflowManager).
+
+### Qué gana/pierde disabled en ESTE cluster (verificado en vivo, 2026-07-20)
+
+Por qué `shared`/`local` rompen acá: ambos enslavan el uplink `eth1`, que en el
+sustrato **VirtualBox host-only es también el único camino de management/API**. Un
+`NicToBridge()` a medias, o el OVS del host recreando `breth` desde su db en el
+boot, deja la IP del nodo **atrapada detrás de OVS** → nodo (y en el master, el
+control-plane) inalcanzable. Ese es el incidente. Sólo `disabled` evita el enslave.
+
+Qué se **pierde** en disabled: el rol del gateway OVN en **ingress norte-sur**
+(NodePort/ExternalIP/LoadBalancer resueltos por el GR) y las features que dependen
+del GR (**EgressIP**, **EgressService**).
+
+Qué **sigue funcionando** (medido en el cluster, no asumido):
+
+| Prueba | Comando | Resultado |
+|---|---|---|
+| Egress pod → internet | `curl 1.1.1.1` desde un pod | `exit=0` (alcanza el exterior) |
+| ClusterIP (API server) | `curl https://10.96.0.1:443` desde un pod | `HTTP 403` (el API responde) |
+| Pod↔pod / secondary L2 | labs l2-attacks (Geneve) | OK |
+
+El **ingress externo** lo provee **MetalLB (L2) + Traefik**, no el gateway OVN —
+por eso disabled es viable para este cluster de labs.
+
+### Gotchas de configuración (por qué `""` no es trivial upstream)
+
+- **Coerción por flag legacy** (`config.go:1910-1917`): aunque `--gateway-mode`
+  sea vacío, el flag **deprecado `--init-gateways`** lo fuerza a `shared` (o
+  `local` si además está `--gateway-local`).
+- **Coerción por entrypoint**: upstream `ovnkube.sh` reescribe vacío→`"shared"`
+  (`ovn_gateway_mode=${OVN_GATEWAY_MODE:-"shared"}`). **Parcheado con `sed`** en la
+  imagen HackCTF (si no, `OVN_GATEWAY_MODE=""` en el DS no tiene efecto).
+- **Restricciones** (`config.go:1952-1958`): en disabled, `gateway-interface` y
+  `gateway next-hop` no están permitidos (error de arranque si se setean).
+- **Panics del binario en disabled**: upstream asume que siempre hay gateway;
+  deref nil de `openflowManager`/`defaultBridge`. Guardas agregadas en `bacdbdc`.
 
 ## Incidente 2026-07-20
 
