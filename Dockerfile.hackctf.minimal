@@ -23,6 +23,13 @@ RUN GOTOOLCHAIN=go1.25.12 CGO_ENABLED=0 go build -mod=vendor -ldflags="-s -w" -o
 RUN GOTOOLCHAIN=go1.25.12 CGO_ENABLED=0 go build -mod=vendor -ldflags="-s -w" -o /ovn-kube-util ./cmd/ovn-kube-util/
 RUN GOTOOLCHAIN=go1.25.12 CGO_ENABLED=0 go build -mod=vendor -ldflags="-s -w" -o /ovnkube-identity ./cmd/ovnkube-identity/
 RUN GOTOOLCHAIN=go1.25.12 CGO_ENABLED=0 go build -mod=vendor -ldflags="-s -w" -o /ovndbchecker ./cmd/ovndbchecker/
+# CRITICO: sin esto, ovnkube.sh (linea 610: cp -f /usr/libexec/cni/ovn-k8s-cni-overlay
+# /opt/cni/bin/ovn-k8s-cni-overlay) falla porque el binario fuente no existe en la
+# imagen, y CUALQUIER pod que no use hostNetwork queda en FailedCreatePodSandBox
+# permanente ("failed to find plugin ovn-k8s-cni-overlay in path"). Confirmado en
+# vivo 2026-07-26 (nervous-vaughan, primer pod PodNetwork real de la sesion:
+# topolvm-node). Ver dist/images/Dockerfile.ubuntu (oficial) para el patron.
+RUN GOTOOLCHAIN=go1.25.12 CGO_ENABLED=0 go build -mod=vendor -ldflags="-s -w" -o /ovn-k8s-cni-overlay ./cmd/ovn-k8s-cni-overlay/
 
 # ============================================
 # Stage 2: Build minimal Ubuntu rootfs
@@ -77,6 +84,9 @@ COPY --from=builder /ovnkube /usr/bin/ovnkube
 COPY --from=builder /ovn-kube-util /usr/bin/ovn-kube-util
 COPY --from=builder /ovnkube-identity /usr/bin/ovnkube-identity
 COPY --from=builder /ovndbchecker /usr/bin/ovndbchecker
+# Ruta esperada por ovnkube.sh (ver dist/images/Dockerfile.ubuntu oficial):
+# ovnkube.sh copia de aca a /opt/cni/bin/ en cada nodo al arrancar el DaemonSet.
+COPY --from=builder /ovn-k8s-cni-overlay /usr/libexec/cni/ovn-k8s-cni-overlay
 
 # Copy ovnkube.sh entry script (convert CRLF -> LF to fix bash shebang)
 COPY dist/images/ovnkube.sh /root/ovnkube.sh

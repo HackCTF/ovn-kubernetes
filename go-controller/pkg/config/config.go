@@ -123,9 +123,19 @@ var (
 		PlatformType:            "",
 		DNSServiceNamespace:     "kube-system",
 		DNSServiceName:          "kube-dns",
-		// By default, use a short lifetime length for certificates to ensure that the automatic rotation works well,
-		// might revisit in the future to use a more sensible value
-		CertDuration: 10 * time.Minute,
+		// HACKCTF: el default upstream (10 * time.Minute) es un placeholder de
+		// testing dejado por error - el propio comentario original admite que
+		// "might revisit in the future to use a more sensible value". Con una
+		// vida tan corta, cada rotacion de certificado (cada ~10-15 min por
+		// nodo, round-robin entre todos los nodos del cluster) fuerza un
+		// recompute completo en ovn-controller, que nunca llega a converger
+		// en un cluster real - los flujos OpenFlow de load-balancing de
+		// servicios (br-int) quedan permanentemente vacios, rompiendo TODOS
+		// los ClusterIP. Confirmado en vivo 2026-07-26. 24h es un valor
+		// razonable para produccion: sigue rotando a diario (mejor postura
+		// de seguridad que un cert estatico de larga duracion) sin generar
+		// el churn que rompe el datapath.
+		CertDuration: 24 * time.Hour,
 	}
 
 	// Metrics holds Prometheus metrics-related parameters.
