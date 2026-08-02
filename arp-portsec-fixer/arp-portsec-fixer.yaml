@@ -1,0 +1,126 @@
+---
+# ARP Port-Security Fixer Controller — Deployment
+#
+# Watches pods with label:
+#   arp.kumi.io/attacker=true   → pods whose OVN LSPs must have port_security=[]
+#
+# Clears OVN port_security on attacker LSPs to enable ARP-spoofing MITM on
+# layer2 labs. Runs as a Deployment (replicas=1) because OVN NB is cluster-wide
+# (single ovnkube-db pod) — unlike span-mirror-controller which is a DaemonSet
+# (node-local OVS bridges).
+#
+# Deployment:
+#   kubectl create configmap arp-portsec-scripts \
+#     --from-file=arp-portsec-fixer.sh=arp-portsec-fixer.sh \
+#     -n kube-system
+#   kubectl apply -f arp-portsec-fixer.yaml
+#
+# Or use the deploy script:
+#   ./deploy-arp-portsec-fixer.sh
+#
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: arp-portsec-fixer
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: arp-portsec-fixer
+rules:
+- apiGroups: [""]
+  resources: ["pods", "nodes"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: arp-portsec-ovs-exec
+  namespace: ovn-kubernetes
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list"]
+- apiGroups: [""]
+  resources: ["pods/exec"]
+  verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: arp-portsec-ovs-exec
+  namespace: ovn-kubernetes
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: arp-portsec-ovs-exec
+subjects:
+- kind: ServiceAccount
+  name: arp-portsec-fixer
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: arp-portsec-fixer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: arp-portsec-fixer
+subjects:
+- kind: ServiceAccount
+  name: arp-portsec-fixer
+  namespace: kube-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: arp-portsec-fixer
+  namespace: kube-system
+  labels:
+    app: arp-portsec-fixer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: arp-portsec-fixer
+  template:
+    metadata:
+      labels:
+        app: arp-portsec-fixer
+    spec:
+      serviceAccountName: arp-portsec-fixer
+      tolerations:
+      - key: node-role.kubernetes.io/control-plane
+        effect: NoSchedule
+      - key: node-role.kubernetes.io/master
+        effect: NoSchedule
+      - operator: Exists
+        effect: NoExecute
+      - operator: Exists
+        effect: NoSchedule
+      containers:
+      - name: controller
+        image: harbor.k8s.local/library/kubectl:1-debian13-dev
+        command: ["/bin/bash", "/scripts/arp-portsec-fixer.sh"]
+        env:
+        - name: POLL_INTERVAL
+          value: "5"
+        - name: OVN_NAMESPACE
+          value: "ovn-kubernetes"
+        - name: DB_CONTAINER
+          value: "nb-ovsdb"
+        - name: LOG_LEVEL
+          value: "INFO"
+        - name: ATTACKER_LABEL
+          value: "arp.kumi.io/attacker=true"
+        volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+          readOnly: true
+      volumes:
+      - name: scripts
+        configMap:
+          name: arp-portsec-scripts
+          defaultMode: 0755
