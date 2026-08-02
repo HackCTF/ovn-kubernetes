@@ -128,19 +128,20 @@ reconcile() {
     local changed=0
     while IFS= read -r attacker; do
         [[ -z "$attacker" ]] && continue
-        local ns pod suffix
+        local ns pod
         ns=$(echo "$attacker" | cut -d'/' -f1)
         pod=$(echo "$attacker" | cut -d'/' -f2)
-        # OVN-K LSP name suffix is "_<namespace>_<podname>" for primary and
-        # secondary networks alike (e.g. user-superadmin_kali-attack-... and
-        # user.superadmin...vlan10_user-superadmin_kali-attack-...).
-        suffix="_${ns}_${pod}"
+        # OVN-K LSP naming for a pod follows two conventions:
+        #   - primary network:    <namespace>_<podname>      (e.g. default_arp-test-attacker)
+        #   - secondary networks: <ls>_<namespace>_<podname> (e.g. lab-...-vlan10_user-superadmin_kali-attack-<hash>)
+        # Match both with an anchored pattern (^|_)<ns>_<pod>$ .
+        local pod_pat pod_lsps
+        pod_pat=$(printf '%s' "${ns}_${pod}" | sed 's/\./\\./g')
 
         # Resolve matching LSP names for this pod
-        local pod_lsps
-        pod_lsps=$(echo "$all_lsps" | grep -E "${suffix}$" || true)
+        pod_lsps=$(echo "$all_lsps" | grep -E "(^|_)${pod_pat}$" || true)
         if [[ -z "$pod_lsps" ]]; then
-            log WARN "No LSPs found for attacker $attacker (suffix ${suffix})"
+            log WARN "No LSPs found for attacker $attacker (pattern _${ns}_${pod}\$)"
             continue
         fi
 
