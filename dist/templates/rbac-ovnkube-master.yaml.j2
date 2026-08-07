@@ -146,6 +146,12 @@ rules:
           - dnsnameresolvers
       verbs: [ "create", "delete", "list", "patch", "update", "watch" ]
     {%- endif %}
+    # HACKCTF FIX: ovnkube-master uses leader election (lease in ovn-kubernetes ns)
+    # for HA control plane. Without this, controller election fails after 300s.
+    - apiGroups: ["coordination.k8s.io"]
+      resources:
+          - leases
+      verbs: [ "get", "create", "update", "delete", "list", "watch" ]
 
 
 # https://github.com/ovn-org/ovn-kubernetes/blob/e1e7d40f9a6c6038b52696c1b8f8915a4d73160e/go-controller/pkg/ovn/topology_version.go#L28

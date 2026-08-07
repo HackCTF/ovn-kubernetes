@@ -135,6 +135,12 @@ rules:
           - services
           - endpoints
       verbs: [ "get", "list", "watch" ]
+    # HACKCTF FIX: ovnkube-node uses leader election (lease in ovn-kubernetes ns)
+    # when ovn_enable_ovnkube_identity is true (default).
+    - apiGroups: ["coordination.k8s.io"]
+      resources:
+          - leases
+      verbs: [ "get", "create", "update", "delete", "list", "watch" ]
     - apiGroups: ["discovery.k8s.io"]
       resources:
           - endpointslices

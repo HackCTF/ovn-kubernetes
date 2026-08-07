@@ -43,6 +43,16 @@ rules:
       resources:
           - nodes
       verbs: ["get", "list", "watch"]
+    # HACKCTF FIX: ovnkube-identity uses leader election and creates
+    # per-zone endpoints (ovnkube-db-combate-<zone>).
+    - apiGroups: [""]
+      resources:
+          - endpoints
+      verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+    - apiGroups: ["coordination.k8s.io"]
+      resources:
+          - leases
+      verbs: ["get", "create", "update", "delete", "list", "watch"]
     - apiGroups: ["certificates.k8s.io"]
       resources:
           - certificatesigningrequests

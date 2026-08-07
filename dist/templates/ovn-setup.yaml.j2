@@ -47,6 +47,10 @@ rules:
   - get
   - list
   - update
+  # HACKCTF FIX: leader election in ovn-kubernetes requires watch+patch+delete.
+  - watch
+  - patch
+  - delete
 
 {% if in_upgrade != "true" -%}
 ---

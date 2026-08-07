@@ -73,21 +73,20 @@ rules:
           - adminpolicybasedexternalroutes
           - egressfirewalls
           - egressqoses
+          - networkqoses
           - userdefinednetworks
           - clusteruserdefinednetworks
-          - routeadvertisements
-          - networkqoses
       verbs: [ "get", "list", "watch" ]
     - apiGroups: ["k8s.ovn.org"]
       resources:
           - egressips
           - egressservices/status
+          - networkqoses/status
           - userdefinednetworks
           - userdefinednetworks/status
           - clusteruserdefinednetworks
           - clusteruserdefinednetworks/status
           - clusteruserdefinednetworks/finalizers
-          - routeadvertisements/status
       verbs: [ "patch", "update" ]
     - apiGroups: [""]
       resources:
@@ -104,7 +103,6 @@ rules:
         - adminpolicybasedexternalroutes/status
         - egressfirewalls/status
         - egressqoses/status
-        - networkqoses/status
       verbs: [ "patch", "update" ]
     - apiGroups: ["policy.networking.k8s.io"]
       resources:
@@ -117,24 +115,18 @@ rules:
           - baselineadminnetworkpolicies/status
       verbs: [ "patch" ]
 
-    {% if ovn_network_segmentation_enable == "true" -%}
+    {{- if eq (hasKey .Values.global "enableNetworkSegmentation" | ternary .Values.global.enableNetworkSegmentation false) true }}
     - apiGroups: ["discovery.k8s.io"]
       resources:
           - endpointslices
       verbs: [ "create", "update", "delete", "deletecollection" ]
-    {%- endif %}
-    {% if ovn_enable_dnsnameresolver == "true" -%}
+    {{- end }}
+    {{- if eq (hasKey .Values.global "enableDNSNameResolver" | ternary .Values.global.enableDNSNameResolver false) true }}
     - apiGroups: ["network.openshift.io"]
       resources:
           - dnsnameresolvers
       verbs: [ "create", "delete", "list", "patch", "update", "watch" ]
-    {%- endif %}
-    {% if ovn_route_advertisements_enable == "true" -%}
-    - apiGroups: ["frrk8s.metallb.io"]
-      resources:
-          - frrconfigurations
-      verbs: [ "create", "delete", "list", "patch", "update", "watch" ]
-    {%- endif %}
+    {{- end }}
     # HACKCTF FIX: ovnkube-cluster-manager uses leader election (lease in
     # ovn-kubernetes ns) for HA. Without this, controller election fails.
     - apiGroups: ["coordination.k8s.io"]
